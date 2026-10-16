@@ -222,6 +222,42 @@ bash "$SKILL_DIR/scripts/delivery.sh" set poke codex "$(cygpath -u "$TEST_PROJEC
         self.assertFalse(hooks.get("hooks"))
         self.assertNotIn("turn/interrupt", [m["method"] for m in self.requests()])
 
+    def test_slow_role_check_keeps_control_pipe_responsive(self):
+        marker = self.root / "role-check-started"
+        self.env["TEST_CHECK_STARTED"] = str(marker)
+        self.run_bridge("--activate-current")
+        (self.driver / "codex-monitor-activate.sh").write_text(
+            ': > "$TEST_CHECK_STARTED"\nsleep 10\nprintf "team\\talice\\n"\n', encoding="utf-8")
+        deadline = time.monotonic() + 20
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(.05)
+        self.assertTrue(marker.exists(), self.bridge_log())
+        command = ["node", str(self.driver / "monitor-control.js")]
+        args = [str(self.project), "team", "alice", self.thread]
+        status = subprocess.run(command + ["status"] + args, env=self.env,
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        stopped = subprocess.run(command + ["stop"] + args, env=self.env,
+                                 capture_output=True, text=True, timeout=10)
+        self.assertEqual(stopped.returncode, 0, stopped.stderr)
+        self.assertFalse((self.skill / "run/codex-bridge.team.alice.pid").exists())
+        self.assertNotIn("turn/interrupt", [m["method"] for m in self.requests()])
+
+    def test_real_activation_check_refuses_poke_mode(self):
+        shutil.copyfile(ROOT / "scripts/drivers/types/codex/codex-monitor-activate.sh",
+                        self.driver / "codex-monitor-activate.sh")
+        result = subprocess.run([BASH, "-c", '''
+SKILL_DIR="$(cygpath -u "$TEST_SKILL")"
+. "$SKILL_DIR/scripts/lib/poke-mode.sh"
+mkdir -p "$SKILL_DIR/run"
+printf 'pending\\n' > "$(agmsg_poke_mode_path codex "$TEST_PROJECT")"
+bash "$SKILL_DIR/scripts/drivers/types/codex/codex-monitor-activate.sh" --check "$TEST_PROJECT" "$CODEX_THREAD_ID"
+'''], env=dict(self.env, TEST_SKILL=str(self.skill)),
+                                capture_output=True, encoding="utf-8", timeout=45)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("disabled while poke mode is selected", result.stderr)
+        self.assertFalse(self.requests())
+
     def test_claude_poke_transition_waits_for_native_path_watcher_to_exit(self):
         settings = self.project / ".claude/settings.local.json"
         settings.parent.mkdir()

@@ -47,6 +47,17 @@ After a PC reboot, open Codex, select the role, and run `mode monitor` again.
 Other projects on an already running dispatcher's allowlist are not added
 automatically; restart it externally with all required `-Project` values.
 
+`mode poke` also stops monitor subscriptions, and its pending marker prevents
+new attached monitors from starting until another mode is explicitly selected.
+Ownership checks run asynchronously with hidden Windows child processes so slow
+Git Bash startup neither opens console windows nor blocks stop/status requests.
+After updating an older bridge, stop it once and re-enable the desired mode to
+load the new runtime. The stop command allows up to 45 seconds for an older
+bridge to answer its identity check; an error leaves poke setup incomplete and
+must not be reported as successful receiving. Delivery mode is shared by all
+sessions of the same agent type in a project: selecting monitor in another
+Codex session also clears that project's Codex poke selection.
+
 To roll back, run `mode off`, stop the lifecycle dispatcher, restore the backed-up
 installation and project hooks, then reopen Codex. No OS registration is removed
 because this feature creates none.

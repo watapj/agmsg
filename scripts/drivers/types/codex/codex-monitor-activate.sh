@@ -13,6 +13,12 @@ source "$SKILL_DIR/scripts/lib/role-session.sh"
 check=0
 if [ "${1:-}" = --check ]; then check=1; shift; fi
 PROJECT="$(agmsg_canonical_path "${1:?project required}")"
+# shellcheck source=../../../lib/poke-mode.sh
+source "$SKILL_DIR/scripts/lib/poke-mode.sh"
+if [ -f "$(agmsg_poke_mode_path codex "$PROJECT")" ]; then
+  echo 'Codex monitor is disabled while poke mode is selected.' >&2
+  exit 1
+fi
 thread="${2:-${CODEX_THREAD_ID:-}}"
 case "$thread" in ''|*[!a-zA-Z0-9._-]*) echo 'Codex monitor requires CODEX_THREAD_ID.' >&2; exit 1 ;; esac
 pair="$(agmsg_role_session_match_unique codex "$PROJECT" "$thread" || true)"

@@ -13,11 +13,11 @@ function address(root, project, pair) {
   return `\\\\.\\pipe\\agmsg-codex-${key}`;
 }
 
-function query(pipe, action = "status") {
+function query(pipe, action = "status", timeoutMs = action === "stop" ? 45000 : 1500) {
   return new Promise((resolve, reject) => {
     const socket = net.connect(pipe);
     let data = "";
-    socket.setTimeout(action === "stop" ? 45000 : 1500, () => socket.destroy(new Error("monitor control timeout")));
+    socket.setTimeout(timeoutMs, () => socket.destroy(new Error("monitor control timeout")));
     socket.on("connect", () => socket.end(`${action}\n`));
     socket.on("data", (chunk) => {
       data += chunk;
@@ -115,7 +115,9 @@ if (require.main === module) {
     const root = path.resolve(__dirname, "../../../..");
     const pipe = address(root, project, [{ team, name }]);
     let status;
-    try { status = await query(pipe); } catch (error) {
+    // A legacy bridge may still be blocked in a slow synchronous Bash check.
+    // Let it answer before validating the exact thread and asking it to stop.
+    try { status = await query(pipe, "status", action === "stop" ? 45000 : 1500); } catch (error) {
       if (action === "stop" && ["ENOENT", "ECONNREFUSED"].includes(error.code)) return;
       throw error;
     }

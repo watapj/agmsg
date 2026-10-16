@@ -357,7 +357,7 @@ function parseArgs(argv) {
     die(`project path is not a directory: ${opts.project}`);
   }
   if (opts.activateCurrent || opts.attachCurrent || opts.stopAttached) {
-    const converted = spawnSync(BASH_BIN, ["-c", 'cygpath -u "$1"', "_", opts.project], { encoding: "utf8" });
+    const converted = spawnSync(BASH_BIN, ["-c", 'cygpath -u "$1"', "_", opts.project], { encoding: "utf8", windowsHide: true });
     if (converted.error || converted.status !== 0) die("cannot convert current project to a Git Bash path");
     opts.scriptProject = converted.stdout.replace(/\r?\n$/, "");
   }
@@ -368,6 +368,7 @@ function runScript(script, args) {
   const result = spawnSync(BASH_BIN, [path.join(SCRIPTS_DIR, script), ...args], {
     cwd: SKILL_DIR,
     encoding: "utf8",
+    windowsHide: true,
   });
   if (result.error) die(`${script} failed: ${result.error.message}`);
   return result;
@@ -429,6 +430,7 @@ class AppServerClient {
     this.child = spawn(bin, args, {
       cwd: this.cwd,
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
     });
 
     this.child.on("error", (error) => {
@@ -1127,7 +1129,9 @@ class CodexBridge {
       this.attachTimer = setInterval(() => {
         if (this.attachCheckPending || this.stopping) return;
         this.attachCheckPending = true;
-        this.checkCurrentThread().catch((error) => this.failClientHandler("current-session check", error))
+        this.checkCurrentThread().catch((error) => {
+          if (!this.stopping) this.failClientHandler("current-session check", error);
+        })
           .finally(() => { this.attachCheckPending = false; });
       }, 5000);
     }
@@ -1143,7 +1147,23 @@ class CodexBridge {
     if (!cwd || fs.realpathSync(cwd).toLowerCase() !== fs.realpathSync(this.opts.project).toLowerCase()) {
       throw new Error("current thread project does not match the requested project");
     }
-    const role = runScript("drivers/types/codex/codex-monitor-activate.sh", ["--check", this.opts.scriptProject, this.threadId]);
+    // Slow MSYS startup must not block control-pipe stop/status requests.
+    const role = await new Promise((resolve, reject) => {
+      const child = spawn(BASH_BIN, [path.join(SCRIPT_DIR, "codex-monitor-activate.sh"), "--check", this.opts.scriptProject, this.threadId], {
+        cwd: SKILL_DIR, windowsHide: true, timeout: 30000, stdio: ["ignore", "pipe", "pipe"],
+      });
+      this.attachCheckChild = child;
+      let stdout = "";
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
+      child.stderr.resume();
+      child.on("error", reject);
+      child.on("close", (status) => {
+        if (this.attachCheckChild === child) this.attachCheckChild = null;
+        resolve({ status, stdout });
+      });
+    });
+    if (this.stopping) return;
     if (role.status !== 0 || role.stdout.trim() !== `${this.identity.team}\t${this.identity.name}`) {
       throw new Error("current thread no longer owns this role; run agmsg actas first");
     }
@@ -1165,7 +1185,7 @@ class CodexBridge {
         spawnSync(BASH_BIN, [
           path.join(SCRIPT_DIR, "codex-record-session.sh"),
           pair.team, pair.name, toPosixPath(this.opts.project),
-        ], { cwd: SKILL_DIR, encoding: "utf8", env: { ...process.env, CODEX_THREAD_ID: this.threadId } });
+        ], { cwd: SKILL_DIR, encoding: "utf8", windowsHide: true, env: { ...process.env, CODEX_THREAD_ID: this.threadId } });
       } catch (error) {
         console.error(`codex-bridge: could not record seat for ${pair.team}/${pair.name}: ${error.message}`);
       }
@@ -1245,7 +1265,7 @@ class CodexBridge {
             "-Command",
             `(Get-Process -Id ${process.pid}).StartTime.Ticks`,
           ],
-          { encoding: "utf8" },
+          { encoding: "utf8", windowsHide: true },
         );
         const ticks = (r.status === 0 ? (r.stdout || "") : "").trim();
         if (/^\d+$/.test(ticks)) return { src: "pwsh", token: ticks };
@@ -1800,7 +1820,7 @@ class CodexBridge {
     const eligibleArgs = [path.join(SCRIPT_DIR, "eligible-pairs.sh"), this.opts.scriptProject || toPosixPath(this.opts.project), this.opts.type];
     if (this.opts.ownerId) eligibleArgs.push("--owner", this.opts.ownerId);
     eligibleArgs.push(...this.identities.flatMap((pair) => ["--pair", `${pair.team}\t${pair.name}`]));
-    const eligible = spawnSync(BASH_BIN, eligibleArgs, { cwd: this.opts.project, encoding: "utf8" });
+    const eligible = spawnSync(BASH_BIN, eligibleArgs, { cwd: this.opts.project, encoding: "utf8", windowsHide: true });
     if (eligible.error || eligible.status !== 0) {
       console.error("codex-bridge: could not resolve eligible identities before reading inbox");
       return "";
@@ -1812,7 +1832,7 @@ class CodexBridge {
       // --quiet: an empty inbox must read back as EMPTY. The human-facing
       // "No new messages." line is non-blank, passed tryStartTurn's emptiness
       // check, and became the entire prompt of an injected turn.
-      const result = spawnSync(BASH_BIN, [path.join(SCRIPTS_DIR, "inbox.sh"), pair.team, pair.name, "--quiet"], { cwd: this.opts.project, encoding: "utf8" });
+      const result = spawnSync(BASH_BIN, [path.join(SCRIPTS_DIR, "inbox.sh"), pair.team, pair.name, "--quiet"], { cwd: this.opts.project, encoding: "utf8", windowsHide: true });
       if (result.error || result.status !== 0) { console.error(`codex-bridge: inbox.sh failed for ${pair.team}/${pair.name}`); continue; }
       if ((result.stdout || "").trim()) sections.push(result.stdout.trim());
     }
@@ -1824,6 +1844,7 @@ class CodexBridge {
     this.stopping = true;
     this.monitorReady = false;
     clearInterval(this.attachTimer);
+    if (this.attachCheckChild) this.attachCheckChild.kill();
     if (this.controlServer) this.controlServer.close();
     this.clearWatchRearmTimer();
     this.clearTurnWatchdog();
@@ -2021,7 +2042,7 @@ async function main() {
     const pipe = control.address(SKILL_DIR, opts.project, identities);
     if (opts.stopAttached) {
       let status;
-      try { status = await control.query(pipe); } catch (error) {
+      try { status = await control.query(pipe, "status", 45000); } catch (error) {
         if (error.code === "ENOENT" || error.code === "ECONNREFUSED") return;
         throw error;
       }
