@@ -92,7 +92,7 @@ storage_read_cursor_get <team> <agent>
 storage_read_cursor_consume <team> <agent> <delivery-cursor> [<id> ...]
 storage_watch_tip <team:agent> [<team:agent> ...]
 storage_watch_after <cursor> <team:agent> [<team:agent> ...]
-storage_history <team> [agent] [--limit N]
+storage_history <team> [agent] [--limit N] [--id ID]
 storage_export <file>
 storage_import <file>
 storage_compact                # internal; see §2.7
@@ -120,6 +120,11 @@ Read-state is deliberately **not** carried on a history record — it is
 recipient-scoped (§2.3), so a consumer that wants a read/unread marker derives it
 by cross-referencing `storage_list_unread` for the relevant recipient rather than
 from the history record itself.
+
+`--id ID` restricts the matching set to that exact message identifier before
+applying `--limit`. It preserves the team/agent scope and returns messages
+regardless of read state, without advancing a read cursor. Both bundled drivers
+support this option for recovering a truncated monitor notification.
 
 **stdout framing.** The **control ops** — `storage_check`, `storage_init`,
 `storage_mark_read_batch`, `storage_read_cursor_consume`, `storage_compact` —

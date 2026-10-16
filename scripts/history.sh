@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: history.sh <team> [agent_id] [limit]
+# Usage: history.sh <team> [agent_id] [limit] [--id <message_id>]
 # Shows message history. If agent_id given, shows only that agent's messages.
 
 TEAM="${1:?Usage: history.sh <team> [agent_id] [limit]}"
-AGENT="${2:-}"
-LIMIT="${3:-20}"
+shift
+AGENT=""; LIMIT=20; MESSAGE_ID=""
+if [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; then AGENT="$1"; shift; fi
+if [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; then LIMIT="$1"; shift; fi
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --id) MESSAGE_ID="${2:?--id requires a message id}"; shift 2 ;;
+    *) echo "history: unknown option: $1" >&2; exit 1 ;;
+  esac
+done
 # A non-numeric limit would otherwise be interpolated straight into the SQL
 # text below (e.g. "1; DELETE FROM messages; --"); fall back to the default
 # rather than passing it through, mirroring the interval-validation idiom
@@ -42,7 +50,9 @@ fi
 # History (events ∪ legacy) via the facade; <agent> optional — omitted = whole
 # team (§2.1). The driver returns the most recent --limit records already in
 # chronological order, so no reversal here.
-HIST_JSONL=$(storage_history "$TEAM" "$AGENT" --limit "$LIMIT")
+history_args=("$TEAM" "$AGENT" --limit "$LIMIT")
+[ -z "$MESSAGE_ID" ] || history_args+=(--id "$MESSAGE_ID")
+HIST_JSONL=$(storage_history "${history_args[@]}")
 
 if [ -z "$HIST_JSONL" ]; then
   echo "No message history."

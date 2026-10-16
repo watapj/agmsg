@@ -426,15 +426,20 @@ storage_history() {
 
 _jsonl_history_locked() {
   local team="$1"; shift
-  local agent="" limit=""
+  local agent="" limit="" message_id=""
   if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then agent="$1"; shift; fi
-  while [ $# -gt 0 ]; do case "$1" in --limit) limit="$2"; shift 2 ;; *) shift ;; esac; done
+  while [ $# -gt 0 ]; do case "$1" in
+    --limit) limit="$2"; shift 2 ;;
+    --id) message_id="${2:?--id requires a message id}"; shift 2 ;;
+    *) shift ;;
+  esac; done
   case "$limit" in ''|*[!0-9]*) limit="-1" ;; esac
-  jq -c --arg team "$team" --arg agent "$agent" --argjson limit "$limit" -s '
+  jq -c --arg team "$team" --arg agent "$agent" --arg id "$message_id" --argjson limit "$limit" -s '
     def logical_events: .[] | if .type=="sync_pull_commit" then
     .messages[]? | select(.status=="imported") | .local_event // empty else . end;
     [logical_events | select(.type=="message_sent" and .team==$team
-            and ($agent=="" or .to==$agent or .from==$agent))
+            and ($agent=="" or .to==$agent or .from==$agent)
+            and ($id=="" or (.id|tostring)==$id))
      | {type:"message_sent",id:.id,team:.team,from:.from,to:.to,body:.body,at:.at}]
     | (if $limit >= 0 and (length > $limit) then .[length-$limit:] else . end)
     | .[]

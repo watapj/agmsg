@@ -530,21 +530,26 @@ storage_watch_after() {
 
 # --- contract: history -----------------------------------------------------
 
-# storage_history <team> [agent] [--limit N]  — events ∪ legacy in time order.
+# storage_history <team> [agent] [--limit N] [--id ID] — events ∪ legacy.
 # With <agent>, only rows where that agent is sender or recipient; omit it (empty)
 # for the whole team (§2.1 G3 — an additive widening, existing callers unchanged).
 storage_history() {
   local team="$1"; shift
-  local agent="" limit=""
+  local agent="" limit="" message_id=""
   # <agent> is optional: consume a leading NON-flag argument as the agent (an
   # empty string is allowed and also means team-wide). A leading --flag means no
   # agent was given. This is what makes `storage_history <team> --limit N` and
   # `storage_history <team>` parse correctly per the §2.1 contract (review).
   if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then agent="$1"; shift; fi
-  while [ $# -gt 0 ]; do case "$1" in --limit) limit="$2"; shift 2 ;; *) shift ;; esac; done
+  while [ $# -gt 0 ]; do case "$1" in
+    --limit) limit="$2"; shift 2 ;;
+    --id) message_id="${2:?--id requires a message id}"; shift 2 ;;
+    *) shift ;;
+  esac; done
   case "$limit" in ''|*[!0-9]*) limit="" ;; esac
   storage_init "$team" >/dev/null
-  local tl al afilter; tl="$(_sqlite_lit "$team")"; al="$(_sqlite_lit "$agent")"
+  local tl al afilter id_filter=""; tl="$(_sqlite_lit "$team")"; al="$(_sqlite_lit "$agent")"
+  [ -z "$message_id" ] || id_filter="AND CAST(id AS TEXT)='$(_sqlite_lit "$message_id")'"
   if [ -n "$agent" ]; then
     afilter="AND (to_agent='$al' OR from_agent='$al')"
   else
@@ -559,13 +564,13 @@ storage_history() {
         SELECT json_object('type','message_sent','id',id,'team',team,'from',from_agent,
                  'to',to_agent,'body',body,'at',at) AS j, at AS ts, 1 AS src, seq AS ord
         FROM events
-        WHERE type='message_sent' AND team='$tl' $afilter
+        WHERE type='message_sent' AND team='$tl' $afilter $id_filter
         UNION ALL
         SELECT json_object('type','message_sent','id',CAST(id AS TEXT),'team',team,
                  'from',from_agent,'to',to_agent,'body',body,'at',created_at) AS j,
                created_at AS ts, 0 AS src, id AS ord
         FROM messages
-        WHERE team='$tl' $afilter
+        WHERE team='$tl' $afilter $id_filter
           -- The event log already carries the mirrored copy (#689); listing
           -- both shows one message twice.
           AND NOT EXISTS (SELECT 1 FROM events e2 WHERE e2.legacy_id = messages.id)

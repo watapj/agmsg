@@ -42,6 +42,37 @@ _cursor_of() { printf '%s\n' "$1" | sed -n 's/.*"type":"cursor","cursor":"\([^"]
   [[ "$output" == *"$id"* ]]
 }
 
+@test "contract: history --id recovers a read message before applying the limit" {
+  local first second before
+  first=$(storage_send agsuite alice bob "already delivered full body")
+  second=$(storage_send agsuite alice bob "new unrelated message")
+  storage_mark_read_batch agsuite bob "$first"
+  before=$(storage_list_unread agsuite bob)
+  run storage_history agsuite bob --limit 1 --id "$first"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already delivered full body"* ]]
+  [[ "$output" != *"new unrelated message"* ]]
+  run bash "$SCRIPTS/history.sh" agsuite bob --id "$first"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already delivered full body"* ]]
+  [[ "$output" != *"new unrelated message"* ]]
+  [ "$(storage_list_unread agsuite bob)" = "$before" ]
+}
+
+@test "contract: history --id preserves agent scope and treats SQL characters as data" {
+  local id
+  id=$(storage_send agsuite alice bob "only bob")
+  run storage_history agsuite carol --id "$id"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  run storage_history agsuite bob --id "no-such-id' OR 1=1 --"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  run bash "$SCRIPTS/history.sh" agsuite bob --id
+  [ "$status" -ne 0 ]
+  [ -n "$(storage_list_unread agsuite bob)" ]
+}
+
 @test "contract: mark_read_batch is idempotent (double mark is a no-op)" {
   local id; id=$(storage_send agsuite alice bob "x")
   storage_mark_read_batch agsuite bob "$id"
