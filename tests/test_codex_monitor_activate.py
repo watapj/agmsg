@@ -223,6 +223,11 @@ bash "$SKILL_DIR/scripts/delivery.sh" set poke codex "$(cygpath -u "$TEST_PROJEC
         self.assertNotIn("turn/interrupt", [m["method"] for m in self.requests()])
 
     def test_claude_poke_transition_waits_for_native_path_watcher_to_exit(self):
+        settings = self.project / ".claude/settings.local.json"
+        settings.parent.mkdir()
+        original = {"promptSuggestionEnabled": True, "permissions": {"allow": ["Read"]},
+                    "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo unrelated"}]}]}}
+        settings.write_text(json.dumps(original, ensure_ascii=False), encoding="utf-8")
         watcher = self.skill / "scripts/watch.sh"
         watcher.write_text(r'''#!/usr/bin/env bash
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -250,6 +255,24 @@ bash "$skill/scripts/delivery.sh" set poke claude-code "$(cygpath -u "$TEST_PROJ
         self.assertFalse((self.skill / "run/watch.fixture.pid").exists())
         self.assertTrue(any(p.read_text(encoding="utf-8").strip() == "ready"
                             for p in (self.skill / "run").glob("delivery-poke.claude-code.*")))
+        configured = json.loads(settings.read_text(encoding="utf-8"))
+        self.assertIs(configured["promptSuggestionEnabled"], False)
+        self.assertEqual(configured["permissions"], original["permissions"])
+        self.assertEqual(configured["hooks"], original["hooks"])
+        self.assertFalse((self.project / ".codex/hooks.json").exists())
+
+    def test_other_modes_do_not_change_claude_prompt_suggestion_preference(self):
+        settings = self.project / ".claude/settings.local.json"
+        settings.parent.mkdir()
+        settings.write_text(json.dumps({"promptSuggestionEnabled": True}), encoding="utf-8")
+        env = dict(self.env, TEST_SKILL=str(self.skill))
+        for mode in ["turn", "off"]:
+            result = subprocess.run([BASH, "-c", '''
+skill="$(cygpath -u "$TEST_SKILL")"
+bash "$skill/scripts/delivery.sh" set "$1" claude-code "$(cygpath -u "$TEST_PROJECT")"
+''', "_", mode], env=env, capture_output=True, encoding="utf-8", timeout=90)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIs(json.loads(settings.read_text(encoding="utf-8"))["promptSuggestionEnabled"], True)
 
     def test_role_reassignment_stops_the_attached_monitor(self):
         self.run_bridge("--activate-current")

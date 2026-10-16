@@ -198,7 +198,7 @@ agmsg_safe_poke "$BARE_ID" "$TEXT" "$INPUT_MARKER" "$INPUT_BOXED" "$TEAM" "$NAME
   --retries "$RETRIES" --retry-delay "$RETRY_DELAY" --backoff "$BACKOFF" || RC=$?
 
 if [ "$RC" -eq 14 ]; then
-  echo "poke: '$TEAM/$NAME' has a changing input box — refusing to type over it (input in progress)" >&2
+  echo "poke: '$TEAM/$NAME' has a nonempty or changing input box — refusing to type over it (draft or input in progress; Orca may also report a prompt suggestion as a draft)" >&2
   exit 14
 fi
 

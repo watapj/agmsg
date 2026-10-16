@@ -305,6 +305,8 @@ For `mode monitor|turn|both|off|poke`, run `delivery.sh set <mode> claude-code "
 
 `mode poke` disables monitor and turn hooks for this project/type. Stop this session's known agmsg Monitor task as directed; do not start another Monitor or poll inbox. Ordinary sends to this project/type now submit raw bodies through poke. An addressable terminal pane is required.
 
+It also sets this project's `promptSuggestionEnabled` to `false`: Orca can report an unaccepted suggestion as a draft, preventing safe delivery. Follow the command's note for an already running session. Do not bypass draft protection or clear input to work around a refused send. Leaving poke retains this preference; restoring suggestions is an explicit project setting change.
+
 If argument is "fix" (no further words):
 1. Run: `~/.agents/skills/agmsg/scripts/fix.sh` — with NO arguments. `fix` repairs THIS session's own seat marks (placement record, pane label, agent key, session name) at the pane the seat PROVES it is in. It takes no location: the seat establishes where it is from its own process ancestry (and, when that cannot decide, by writing a token to its own screen and finding it), and when it cannot establish that, it writes nothing and says why. Whoever invokes it — a `poke` from another member, a person at the keyboard, or this skill — gets the same answer. Passing a pane, a `--pane`, or any word is refused by name: a location handed in from outside is exactly the mistake this exists to remove.
 2. Show the output. Exit 0: every seat this session holds was written. Exit 2: at least one seat was left unwritten, with `state=` and `reason=` on its line. Exit 1: refused (an argument, no session id, or no seat held by this session).

@@ -68,6 +68,18 @@ Not in `capabilities=`: optional ABI hooks are never listed there (matches
 `terminal_id_ok`/`terminal_peek_styled` on every driver) — a caller checks for
 this one with `declare -F terminal_input_draft` after loading the driver.
 
+Claude prompt suggestions can also appear in `draft`, even though the user has
+not accepted or typed them. The API does not expose their origin, and `tail`
+omits composer contents for both suggestions and genuine drafts. An empty
+rendered prompt therefore cannot safely override a nonempty `draft`.
+`agmsg mode poke` disables Claude's prompt suggestions in this project's
+`.claude/settings.local.json` with `promptSuggestionEnabled: false`. A running
+session may need `/config` → Prompt suggestions off, or a restart, to clear an
+existing suggestion. This setting is retained when leaving poke mode; remove
+the project override or set it to `true` explicitly to restore suggestions.
+The driver continues to refuse nonempty drafts; it never clears or submits a
+suggestion or a user's draft to make delivery succeed.
+
 ## spawn
 
 Creates a new terminal in `<project>`'s worktree (`orca terminal create

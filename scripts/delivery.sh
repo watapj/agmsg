@@ -304,6 +304,8 @@ agmsg_delivery_apply_default() {
     esac
   fi
 
+  # Vendor-specific settings share the same transactional hook-file write.
+  agmsg_delivery_prepare_settings "$tmp_state" "$mode"
   prune_empty_hooks_file "$tmp_state"
 
   _agmsg_hooks_file_finish_write "$hooks_file" "$tmp_state" "$mode" "$type" "$project"
@@ -412,6 +414,7 @@ _agmsg_hooks_file_finish_write() {
 # Default delivery entry points (Template Method). A type's plug
 # (scripts/drivers/types/<name>/_delivery.sh) may override any subset of these:
 #   agmsg_delivery_apply      — write the hook file for a mode (default: JSON event-hooks)
+#   agmsg_delivery_prepare_settings — customize the temporary JSON before its single final write
 #   agmsg_delivery_on_enable  — side effects when enabling monitor/both (default: none)
 #   agmsg_delivery_on_turn    — side effects when switching to turn (default: none)
 #   agmsg_delivery_on_disable — side effects when turning delivery off  (default: none)
@@ -419,6 +422,7 @@ _agmsg_hooks_file_finish_write() {
 #   agmsg_delivery_runtime_status — runtime liveness summary (default: watch.sh pidfiles)
 # A plug that wants the default apply can delegate to agmsg_delivery_apply_default.
 agmsg_delivery_apply() { agmsg_delivery_apply_default "$@"; }
+agmsg_delivery_prepare_settings() { :; }
 agmsg_delivery_on_enable() { :; }
 agmsg_delivery_on_turn() { :; }
 # Default 'off' teardown: stop this (project, type)'s watch.sh watchers. A type

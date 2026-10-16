@@ -356,6 +356,13 @@ still appears in the recipient's session context. Submission confirms terminal
 acceptance, not model completion; require an acknowledgement where needed.
 
 Poke mode removes agmsg monitor/turn hooks and stops existing subscriptions.
+For Claude Code it also sets `promptSuggestionEnabled: false` in this project's
+`.claude/settings.local.json`. Orca can report an unaccepted prompt suggestion
+as a draft, so disabling suggestions keeps the existing draft guard useful.
+For an already displayed suggestion, turn off Prompt suggestions in `/config`
+or restart the session if the setting does not clear it automatically.
+Other delivery modes leave this preference as it is; remove the project
+override or set it to `true` explicitly to restore suggestions.
 Codex's TUI and app-server remain alive. In each already running Claude session,
 follow the printed directive to TaskStop its **known** agmsg Monitor task; do
 not invent task IDs. Finish the current turn when waiting, without polling

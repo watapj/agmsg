@@ -128,4 +128,6 @@ If argument is "mode", run `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh 
 For `mode monitor|turn|both|off|poke`, run `delivery.sh set <mode> __AGENT_TYPE__ "$(pwd)"` and follow its `AGMSG-DIRECTIVE` block. Legacy `hook on` maps to `turn`; `hook off` maps to `off`.
 
 `mode poke` disables monitor and turn hooks for this project/type. Stop this session's known agmsg Monitor task as directed; do not start another Monitor or poll inbox. Ordinary sends to this project/type now submit raw bodies through poke. An addressable terminal pane is required.
+
+It also sets this project's `promptSuggestionEnabled` to `false`: Orca can report an unaccepted suggestion as a draft, preventing safe delivery. Follow the command's note for an already running session. Do not bypass draft protection or clear input to work around a refused send. Leaving poke retains this preference; restoring suggestions is an explicit project setting change.
 <!-- /agmsg:slot mode -->

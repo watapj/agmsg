@@ -40,6 +40,11 @@ SH
     run bash "$SCRIPTS/delivery.sh" set poke "$type" "$PROJECT"
     [ "$status" -eq 0 ]
     grep -q 'echo unrelated' "$PROJECT/$relative"
+    if [ "$type" = claude-code ]; then
+      [ "$(sqlite3 :memory: "SELECT json_extract(readfile('$(rf "$PROJECT/$relative")'),'\$.promptSuggestionEnabled');")" = 0 ]
+    else
+      [ -z "$(sqlite3 :memory: "SELECT json_type(readfile('$(rf "$PROJECT/$relative")'),'\$.promptSuggestionEnabled');")" ]
+    fi
     run grep -E 'session-start.sh|check-inbox.sh' "$PROJECT/$relative"
     [ "$status" -ne 0 ]
     run bash "$SCRIPTS/delivery.sh" status "$type" "$PROJECT"
