@@ -87,7 +87,7 @@ Four possible outputs:
   > - `/agmsg history` — message history
 
 <!-- agmsg:render-overlay claude-code -->
-  5. **REQUIRED — Do NOT skip this step.** Ask the user to pick `monitor`, `turn`, `both`, or `off` delivery. Empty input means `monitor`.
+  5. **REQUIRED — Do NOT skip this step.** Ask the user to pick `monitor`, `turn`, `both`, `poke`, or `off` delivery. Empty input means `monitor`.
      Run `~/.agents/skills/agmsg/scripts/delivery.sh set <mode> claude-code "$(pwd)"` and follow the printed `AGMSG-DIRECTIVE` block.
 
   6. Then check inbox for the newly joined team.

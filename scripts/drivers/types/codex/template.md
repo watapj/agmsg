@@ -6,13 +6,15 @@ On Windows PowerShell, invoke Git Bash explicitly and keep the full `bash -lc` p
 `& 'C:\Program Files\Git\bin\bash.exe' -lc '~/.agents/skills/__SKILL_NAME__/scripts/whoami.sh "$(pwd)" codex'`
 
 Do not use POSIX `'"'"'` quote splicing in PowerShell, and do not use escaped double quotes inside the wrapper.
+
+If Git Bash has already failed in this session's Windows tool sandbox with `CreateFileMapping` / Win32 error 5, use supported outside-sandbox command execution with a scoped justification for subsequent agmsg Bash commands, including read-only commands. Do not repeat the known failing sandbox probe for each script. Keep the sandbox enabled and leave ACLs unchanged; if execution is refused, report the refusal instead of trying another shell.
 <!-- /agmsg:slot shell-extra -->
 
 <!-- agmsg:slot delivery -->
 <!-- agmsg:render-overlay __AGENT_TYPE__ -->
-  5. **REQUIRED — Do NOT skip this step.** Ask the user to pick `monitor`, `turn`, or `off` delivery. Empty input means `monitor`.
+  5. **REQUIRED — Do NOT skip this step.** Ask the user to pick `monitor`, `turn`, `poke`, or `off` delivery. Empty input means `monitor`.
      Run `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> __AGENT_TYPE__ "$(pwd)"`.
-     On Windows, run this command outside the tool sandbox (Git Bash cannot start inside it). It starts the native lifecycle dispatcher and attaches the bridge to this session's existing app-server; it reports receiving only after its watcher is armed. Select a role with `actas` first if none belongs to this thread. An embedded/`--no-daemon` session has no attachment endpoint; report the error and consult `docs/codex-monitor-beta.md`. Linux/macOS use the existing launch wrapper.
+     On Windows, run this command outside the tool sandbox (Git Bash cannot start inside it). For `monitor`, it starts the native lifecycle dispatcher and attaches the bridge to this session's existing app-server; it reports receiving only after its watcher is armed. Select a role with `actas` first if none belongs to this thread. An embedded/`--no-daemon` session has no attachment endpoint; report the error and consult `docs/codex-monitor-beta.md`. Linux/macOS use the existing launch wrapper.
 <!-- /agmsg:slot delivery -->
 
 <!-- agmsg:slot actas -->
