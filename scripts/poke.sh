@@ -7,6 +7,7 @@ set -euo pipefail
 #   poke.sh <team> <name> --body-file <path>   # body read from a file (preferred)
 #   poke.sh <team> <name> --body -             # body read from stdin
 #   poke.sh <team> <name> <text>               # body as ONE quoted argument
+#   --no-fallback refuses unsupported panes without saving another message
 #
 # --body-file is the form the type templates teach, and the reason is #507's
 # lesson: a positional <text> passes through the CALLER's shell first, where a
@@ -77,9 +78,15 @@ shift 2
 RETRIES=0
 RETRY_DELAY=2
 BACKOFF=exponential
+NO_FALLBACK=0
+EXPECT_PROJECT=""
 _REMAINING=()
 while [ $# -gt 0 ]; do
   case "$1" in
+    --no-fallback) NO_FALLBACK=1; shift ;;
+    --expect-project)
+      [ $# -ge 2 ] && [ -n "$2" ] || die "--expect-project needs a project path"
+      EXPECT_PROJECT="$2"; shift 2 ;;
     --retries)
       [ $# -ge 2 ] || die "--retries needs a number"
       case "$2" in ''|*[!0-9]*) die "--retries must be a non-negative integer, got: $2" ;; esac
@@ -126,6 +133,14 @@ REC="$(agmsg_spawn_path "$TEAM" "$NAME")"
 [ -f "$REC" ] || die "no placement record for '$TEAM/$NAME' — nothing here knows which pane is theirs (spawn writes it at launch; a hand-joined member gets one when a terminal-aware session names its pane)"
 
 IFS=$'\t' read -r REF _PROJ TYPE _FENCE < "$REC" || true
+if [ -n "$EXPECT_PROJECT" ]; then
+  _expected="$(agmsg_normalize_project_path "$(agmsg_canonical_path "$EXPECT_PROJECT")")"
+  _placed="$(agmsg_normalize_project_path "$(agmsg_canonical_path "$_PROJ")")"
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) _expected="$(printf '%s' "$_expected" | tr '[:upper:]' '[:lower:]')"; _placed="$(printf '%s' "$_placed" | tr '[:upper:]' '[:lower:]')" ;;
+  esac
+  [ "$_expected" = "$_placed" ] || die "placement project differs from the receiving registration; repair the target's own placement before retrying"
+fi
 [ -n "$REF" ] || die "placement record for '$TEAM/$NAME' has no pane id — a record with no id is not a placement (a bug in whatever wrote it)"
 
 # #1391: the record's own type field can be stale or wrong (a hand-started
@@ -198,7 +213,7 @@ fi
 # points at because that file is surfaced by the TARGET's own terminal on
 # ITS session start, not the caller's — a herdr/tmux caller poking a plain
 # target never reads it otherwise.
-if [ "$RC" -eq 13 ] && [ "$TERMINAL" = plain ] && [ "$BARE_ID" = '-' ]; then
+if [ "$RC" -eq 13 ] && [ "$TERMINAL" = plain ] && [ "$BARE_ID" = '-' ] && [ "$NO_FALLBACK" -eq 0 ]; then
   README_POINTER="see scripts/drivers/terminals/plain/README.md's poke section"
   CALLER_TYPE="$(agmsg_detect_cli_type 2>/dev/null || true)"
 

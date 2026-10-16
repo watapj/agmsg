@@ -60,7 +60,7 @@ setup() {
   # of $CAPTURE / $SCRIPTS / $RUN_DIR come from the environment it inherits.
   cat > "$SCRIPTS/drivers/types/codex/codex-bridge.js" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "$CAPTURE"
+_mock_argv="$*"
 source "$SCRIPTS/lib/hash.sh" 2>/dev/null || true
 _proj=""; _parr=()
 while [ "$#" -gt 0 ]; do
@@ -70,6 +70,13 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
+# The real default bridge publishes its own PID; a custom wrapper is the
+# only path where the launcher publishes $! on the process's behalf.
+if [ "${#_parr[@]}" -eq 1 ]; then
+  _key="${_parr[0]/$'\t'/.}"
+  printf '%s\n' "$$" > "$RUN_DIR/codex-bridge.$_key.pid"
+fi
+printf '%s\n' "$_mock_argv" >> "$CAPTURE"
 _lease="$RUN_DIR/codex-bridge-lease.$$"
 # Start token exactly as codex-bridge-launcher.sh _start_token computes it: /proc
 # field 22 where available, else a trimmed `ps -o lstart=`.
@@ -279,10 +286,10 @@ run_launcher() {
   put_record team alice rec-thread-1 "$PROJ" codex
   export MOCK_BRIDGE_SLEEP=3
   printf '%s\n' 99999999 > "$RUN_DIR/codex-bridge.team.alice.pid"
-  run_launcher 3>&- & local driver_pid=$!
+  run_launcher_until_capture 3>&- & local driver_pid=$!
 
   local i recorded=""
-  for i in {1..50}; do
+  for i in {1..200}; do
     recorded="$(cat "$RUN_DIR/codex-bridge.team.alice.pid" 2>/dev/null || true)"
     [ -n "$recorded" ] && [ "$recorded" != 99999999 ] && break
     sleep 0.1

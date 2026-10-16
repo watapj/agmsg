@@ -66,6 +66,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
 agmsg_storage_load
+# shellcheck source=lib/poke-mode.sh
+. "$SCRIPT_DIR/lib/poke-mode.sh"
+POKE_MODE_FILE="$(agmsg_poke_mode_path "$AGENT_TYPE" "$PROJECT_PATH" 2>/dev/null || true)"
+if [ -n "$POKE_MODE_FILE" ] && [ -f "$POKE_MODE_FILE" ]; then exit 0; fi
 # Warm agmsg_storage_dir's own process-lifetime cache as a PLAIN STATEMENT,
 # not via $(...): every real caller (agmsg_db_path -> ... -> _agmsg_db_file)
 # reaches it through at least one command substitution of its own, and a
@@ -1202,6 +1206,7 @@ _watch_renew_or_stop() {
 }
 
 while true; do
+  if [ -n "$POKE_MODE_FILE" ] && [ -f "$POKE_MODE_FILE" ]; then exit 0; fi
   # Renewal point: see _watch_renew_or_stop above.
   [ -n "$WATCH_MAX_SECONDS" ] && _watch_renew_or_stop
   # Advance the per-cycle cache epoch as a PLAIN STATEMENT (never via $(...) —
@@ -1574,7 +1579,7 @@ EOF
         DESPAWN_TARGET="$to"
         continue
       fi
-      if ! printf '%s | %s | %s → %s | %s\n' "$ts" "$team" "$from" "$to" "$body"; then
+      if ! printf '%s | %s | %s → %s | [id=%s] %s\n' "$ts" "$team" "$from" "$to" "$id" "$body"; then
         cleanup
         exit 0
       fi

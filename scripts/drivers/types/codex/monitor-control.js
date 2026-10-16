@@ -101,3 +101,47 @@ async function activate(pipe, script, args, log, expected) {
 }
 
 module.exports = { address, query, listen, activate };
+
+if (require.main === module) {
+  (async () => {
+    const [action, project, team, name, thread] = process.argv.slice(2);
+    if (process.platform !== "win32" || !["status", "repair", "stop"].includes(action) || !project || !team || !name || !thread) {
+      throw new Error("Usage: monitor-control.js status|repair|stop <project> <team> <name> <thread>");
+    }
+    if ([team, name].some((value) => /[/\\\x00-\x1f]/.test(value) || value === "." || value === "..")) {
+      throw new Error("invalid team or agent name");
+    }
+    const path = require("path");
+    const root = path.resolve(__dirname, "../../../..");
+    const pipe = address(root, project, [{ team, name }]);
+    let status;
+    try { status = await query(pipe); } catch (error) {
+      if (action === "stop" && ["ENOENT", "ECONNREFUSED"].includes(error.code)) return;
+      throw error;
+    }
+    if (!status.ready || status.thread !== thread || !Number.isInteger(status.pid) || status.pid <= 0) {
+      throw new Error("no armed monitor for the requested thread");
+    }
+    if (action === "stop") {
+      await query(pipe, "stop");
+      return;
+    }
+    if (action === "repair") {
+      // Migration only: fix a legacy launcher's MSYS PID after the live pipe
+      // and the bridge's own metadata independently agree on its identity.
+      const base = path.join(root, "run", `codex-bridge.${team}.${name}`);
+      const meta = Object.fromEntries(fs.readFileSync(`${base}.meta`, "utf8").trim().split(/\r?\n/)
+        .map((line) => { const i = line.indexOf("="); return [line.slice(0, i), line.slice(i + 1)]; }));
+      if (meta.pid !== String(status.pid) || meta.type !== "codex" || meta.identities !== `${team}/${name}` ||
+          fs.realpathSync(meta.project).toLowerCase() !== fs.realpathSync(project).toLowerCase()) {
+        throw new Error("bridge metadata does not match the live monitor; leaving its PID unchanged");
+      }
+      const temp = `${base}.pid.${process.pid}.tmp`;
+      try {
+        fs.writeFileSync(temp, `${status.pid}\n`, { flag: "wx" });
+        fs.renameSync(temp, `${base}.pid`);
+      } finally { if (fs.existsSync(temp)) fs.unlinkSync(temp); }
+    }
+    console.log(status.pid);
+  })().catch((error) => { console.error(error.message); process.exitCode = 1; });
+}

@@ -70,6 +70,9 @@ _agmsg_codex_seat_key_ok "$SEAT_KEY" || {
 # identity -- is this seat's own coordination and is keyed by SEAT_KEY so
 # concurrent seats in the same project never contend with each other over it.
 PROJECT_HASH="$(printf '%s' "$PROJECT" | agmsg_sha1)"
+# shellcheck source=../../../lib/poke-mode.sh
+. "$SCRIPT_DIR/../../../lib/poke-mode.sh"
+POKE_MODE_FILE="$(agmsg_poke_mode_path codex "$PROJECT")"
 REQUEST_FILE="$RUN_DIR/codex-bridge-request.$SEAT_KEY"
 DISPATCHER_LOCK_RESOURCE="codex-dispatcher:$SEAT_KEY"
 
@@ -312,6 +315,11 @@ if [ -z "$ROLE_PAIR" ]; then
   known_pairs=""
   while agmsg_runtime_lock_verify "$DISPATCHER_LOCK_RESOURCE" "$$" \
     && _agmsg_pid_alive_local "$LIFETIME_PID"; do
+    if [ -f "$POKE_MODE_FILE" ]; then
+      known_pairs=""
+      sleep 2
+      continue
+    fi
     refresh_identity_cache
     current_pairs="$IDENTITY_CACHE"
     seat_pairs=""
@@ -742,6 +750,10 @@ retire_recorded_bridge() {
 
 deregistered_ticks=0
 while _agmsg_pid_alive_local "$PARENT_PID"; do
+  if [ -f "$POKE_MODE_FILE" ]; then
+    retire_recorded_bridge
+    exit 0
+  fi
   # Resolved once per iteration and threaded through the fingerprint, so a tick
   # runs identities.sh once rather than twice — and usually not at all, because
   # the resolve is served from the mtime-guarded cache.
@@ -924,8 +936,8 @@ EOF
     --inline-inbox \
     >>"$log" 2>&1 3>&- 4>&- &
   launched_pid=$!
-  printf '%s\n' "$launched_pid" > "$pidfile"
   if [ -n "${AGMSG_CODEX_BRIDGE_CMD:-}" ]; then
+    printf '%s\n' "$launched_pid" > "$pidfile"
     # A custom bridge is foregrounded by the test harness, so a plain wait
     # would hide a role change until the bridge exits on its own. Poll the
     # request while it runs and retire this exact leased bridge when the seat
@@ -956,6 +968,9 @@ EOF
     IFS= read -r recorded_pid < "$pidfile" 2>/dev/null || true
     [ "$recorded_pid" != "$launched_pid" ] || rm -f "$pidfile"
   fi
+  # The default Node bridge publishes its native PID. Git Bash's $! belongs
+  # to MSYS and must never replace it (status would report a live bridge dead
+  # and this loop would keep spawning competitors for its named pipe).
   # Record what this bridge is bound to so a later launcher can detect staleness.
   printf '%s' "$req_app_server" > "$appserver_file"
   printf '%s' "$thread_id" > "$thread_file"

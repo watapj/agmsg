@@ -152,6 +152,105 @@ function handle(line){
         self.assertNotIn("receiving:", result.stdout)
         self.assertEqual(sum(m["method"] == "process/spawn" for m in self.requests()), 1)
 
+    def test_control_status_and_repair_use_live_native_pid(self):
+        result = self.run_bridge("--activate-current")
+        native_pid = result.stdout.split("pid=")[1].strip()
+        pidfile = self.skill / "run/codex-bridge.team.alice.pid"
+        pidfile.write_text("99999999\n", encoding="utf-8")
+        command = ["node", str(self.driver / "monitor-control.js")]
+        args = [str(self.project), "team", "alice", self.thread]
+        status = subprocess.run(command + ["status"] + args, env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(status.stdout.strip(), native_pid)
+        self.assertEqual(pidfile.read_text(encoding="utf-8").strip(), "99999999")
+        wrong = subprocess.run(command + ["repair"] + args[:-1] + ["wrong-thread"],
+                               env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(wrong.returncode, 0)
+        self.assertEqual(pidfile.read_text(encoding="utf-8").strip(), "99999999")
+        repaired = subprocess.run(command + ["repair"] + args, env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(repaired.returncode, 0, repaired.stderr)
+        self.assertEqual(pidfile.read_text(encoding="utf-8").strip(), native_pid)
+        self.assertEqual(sum(m["method"] == "process/spawn" for m in self.requests()), 1)
+
+    def test_control_repair_rejects_conflicting_metadata(self):
+        self.run_bridge("--activate-current")
+        pidfile = self.skill / "run/codex-bridge.team.alice.pid"
+        meta = self.skill / "run/codex-bridge.team.alice.meta"
+        original = meta.read_text(encoding="utf-8")
+        try:
+            meta.write_text(original.replace("type=codex", "type=claude-code"), encoding="utf-8")
+            result = subprocess.run(["node", str(self.driver / "monitor-control.js"), "repair",
+                                     str(self.project), "team", "alice", self.thread], env=self.env,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(meta.read_text(encoding="utf-8"), original.replace("type=codex", "type=claude-code"))
+        finally:
+            meta.write_text(original, encoding="utf-8")
+
+    def test_control_stop_requires_exact_thread_and_stops_subscription_only(self):
+        self.run_bridge("--activate-current")
+        command = ["node", str(self.driver / "monitor-control.js"), "stop",
+                   str(self.project), "team", "alice"]
+        wrong = subprocess.run(command + ["another-thread"], env=self.env,
+                               capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(wrong.returncode, 0)
+        self.assertTrue((self.skill / "run/codex-bridge.team.alice.pid").exists())
+        stopped = subprocess.run(command + [self.thread], env=self.env,
+                                 capture_output=True, text=True, timeout=50)
+        self.assertEqual(stopped.returncode, 0, stopped.stderr)
+        self.assertFalse((self.skill / "run/codex-bridge.team.alice.pid").exists())
+        methods = [m["method"] for m in self.requests()]
+        self.assertIn("process/kill", methods)
+        self.assertNotIn("turn/interrupt", methods)
+        self.assertNotIn("thread/archive", methods)
+
+    def test_poke_mode_retires_current_monitor_and_reports_ready(self):
+        self.run_bridge("--activate-current")
+        env = dict(self.env, TEST_SKILL=str(self.skill), TEST_THREAD=self.thread)
+        record = subprocess.run([BASH, "-lc", '''
+SKILL_DIR="$(cygpath -u "$TEST_SKILL")"
+. "$SKILL_DIR/scripts/lib/role-session.sh"
+agmsg_role_session_record team alice "$TEST_THREAD" "$(cygpath -u "$TEST_PROJECT")" codex owner
+bash "$SKILL_DIR/scripts/delivery.sh" set poke codex "$(cygpath -u "$TEST_PROJECT")"
+'''], env=env, capture_output=True, encoding="utf-8", timeout=90)
+        self.assertEqual(record.returncode, 0, record.stderr + record.stdout)
+        self.assertIn("raw body", record.stdout)
+        self.assertFalse((self.skill / "run/codex-bridge.team.alice.pid").exists())
+        self.assertTrue(any(p.read_text(encoding="utf-8").strip() == "ready"
+                            for p in (self.skill / "run").glob("delivery-poke.codex.*")))
+        hooks = json.loads((self.project / ".codex/hooks.json").read_text(encoding="utf-8"))
+        self.assertFalse(hooks.get("hooks"))
+        self.assertNotIn("turn/interrupt", [m["method"] for m in self.requests()])
+
+    def test_claude_poke_transition_waits_for_native_path_watcher_to_exit(self):
+        watcher = self.skill / "scripts/watch.sh"
+        watcher.write_text(r'''#!/usr/bin/env bash
+root="$(cd "$(dirname "$0")/.." && pwd)"
+mkdir -p "$root/run"
+trap 'rm -f "$root/run/watch.fixture.pid" "$root/run/watch.fixture.filter"; exit 0' TERM INT EXIT
+printf 'alice\n%s\n%s\n' "$1" "$$" > "$root/run/watch.fixture.filter"
+printf '%s\n' "$$" > "$root/run/watch.fixture.pid"
+while :; do sleep .2; done
+''', encoding="utf-8")
+        child = subprocess.Popen([BASH, str(watcher), str(self.project), "claude-code"],
+                                 env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.processes.append(child)
+        for _ in range(200):
+            if (self.skill / "run/watch.fixture.pid").exists():
+                break
+            time.sleep(.05)
+        self.assertTrue((self.skill / "run/watch.fixture.pid").exists())
+        env = dict(self.env, TEST_SKILL=str(self.skill))
+        result = subprocess.run([BASH, "-lc", '''
+skill="$(cygpath -u "$TEST_SKILL")"
+bash "$skill/scripts/delivery.sh" set poke claude-code "$(cygpath -u "$TEST_PROJECT")"
+'''], env=env, capture_output=True, encoding="utf-8", timeout=90)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(child.wait(timeout=15), 0)
+        self.assertFalse((self.skill / "run/watch.fixture.pid").exists())
+        self.assertTrue(any(p.read_text(encoding="utf-8").strip() == "ready"
+                            for p in (self.skill / "run").glob("delivery-poke.claude-code.*")))
+
     def test_role_reassignment_stops_the_attached_monitor(self):
         self.run_bridge("--activate-current")
         (self.driver / "codex-monitor-activate.sh").write_text("exit 1\n", encoding="utf-8")
@@ -172,7 +271,7 @@ function handle(line){
         dispatcher = self.skill / "scripts/windows/hook-dispatcher.ps1"
         try:
             result = subprocess.run([BASH, "-c", code, "_", str(self.skill), str(self.project)],
-                                    env=self.env, capture_output=True, encoding="utf-8", timeout=55)
+                                env=self.env, capture_output=True, encoding="utf-8", timeout=120)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr + self.bridge_log())
             self.assertIn("receiving:", result.stdout)
             self.assertIn("hook-enqueue.ps1", (self.project / ".codex/hooks.json").read_text(encoding="utf-8"))

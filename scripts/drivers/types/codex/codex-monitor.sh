@@ -103,6 +103,19 @@ esac
 
 PROJECT="$(cd "$PROJECT" && pwd)"
 
+# Existing shell functions may still call this wrapper directly after a mode
+# switch. Respect explicit poke selection instead of re-enabling monitor.
+# shellcheck source=../../../lib/poke-mode.sh
+. "$SCRIPT_DIR/../../../lib/poke-mode.sh"
+poke_marker="$(agmsg_poke_mode_path codex "$PROJECT")"
+if [ -f "$poke_marker" ]; then
+  cd "$PROJECT"
+  if [ "$CODEX_COMMAND" = codex ]; then
+    exec "$REAL_CODEX" "${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"}"
+  fi
+  exec "$REAL_CODEX" resume "${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"}"
+fi
+
 # Fail-open: never let a broken bridge block codex. If the agmsg app-server can't
 # be brought up — e.g. a codex release changes the app-server interface and the
 # launch/port detection fails — hand off to a plain codex session (no --remote

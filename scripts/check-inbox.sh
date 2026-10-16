@@ -11,6 +11,11 @@ PROJECT="${2:?Missing project_path}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Cached Stop/PostToolUse hooks must not poll after selecting poke.
+# shellcheck source=lib/poke-mode.sh
+. "$SCRIPT_DIR/lib/poke-mode.sh"
+poke_marker="$(agmsg_poke_mode_path "$TYPE" "$PROJECT" 2>/dev/null || true)"
+if [ -n "$poke_marker" ] && [ -f "$poke_marker" ]; then exit 0; fi
 source "$SCRIPT_DIR/lib/storage.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/actas-lock.sh"

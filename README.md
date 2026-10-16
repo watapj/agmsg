@@ -305,9 +305,10 @@ The command updates `db/config.yaml`, rewrites the project's hook entries, and p
 ```
 /agmsg                                  — check inbox (all teams)
 /agmsg history                          — message history
+/agmsg history --id <message_id>        — recover one delivered message
 /agmsg team                             — list team members
 /agmsg send <agent> <message>           — send message
-/agmsg mode <monitor|turn|both|off>     — switch delivery mode
+/agmsg mode <monitor|turn|both|off|poke> — switch delivery mode
 /agmsg mode                             — show current mode
 /agmsg actas <name>                     — switch to another role in this project (create if needed)
 /agmsg drop <name>                      — remove a role from this project
@@ -318,13 +319,65 @@ The command updates `db/config.yaml`, rewrites the project's hook entries, and p
 /agmsg reset                            — clear current project registration
 ```
 
+Monitor events already deliver and mark messages read. Use their text directly.
+If a Claude Monitor notification is truncated, its `[id=...]` prefix identifies
+the full message: run `scripts/history.sh <team> <recipient> --id <id>`. An inbox
+check cannot recover an already delivered message. With healthy monitoring,
+wait for the next event instead of repeatedly checking inboxes or panes; use
+`poke` for explicit requests or diagnosed delivery failures.
+
 ### Codex
 
 ```
 $agmsg                          — or /skills → agmsg
 ```
 
-Codex supports `mode monitor` through an app-server bridge, plus `mode turn` and `mode off`.
+Codex supports `mode monitor` through an app-server bridge, plus `mode turn`, `mode off`, and `mode poke`.
+
+### Direct delivery with poke (Codex and Claude Code)
+
+In each receiving project, select `$agmsg mode poke` in Codex or
+`/agmsg mode poke` in Claude Code. The setting applies to every receiver of that
+type in this project, persists across restarts, and does not change other
+projects or agent types. Existing registrations and placement records are used.
+An addressable terminal pane is required; a bare `plain:-` terminal cannot
+receive this mode. Use `agmsg team` to inspect members and placement.
+After a fresh launch, use `agmsg actas <name>` in each session to claim its own
+unique role and refresh its pane record. Several Codex or Claude sessions must
+use different role names. Poke mode then uses ordinary startup, including the
+existing Codex shell wrapper, without creating monitor subscriptions.
+
+Send normally with `agmsg send <recipient> <message>`. The sender reads the
+recipient's project/type setting, saves the message, and submits its **body
+only** through the existing safe poke driver. No prefix, suffix, sender label,
+or inbox reminder is inserted. The successful submission marks only that
+message read; history retains sender, recipient and full text. The input itself
+still appears in the recipient's session context. Submission confirms terminal
+acceptance, not model completion; require an acknowledgement where needed.
+
+Poke mode removes agmsg monitor/turn hooks and stops existing subscriptions.
+Codex's TUI and app-server remain alive. In each already running Claude session,
+follow the printed directive to TaskStop its **known** agmsg Monitor task; do
+not invent task IDs. Finish the current turn when waiting, without polling
+inbox, panes, or team status. Sessions that cached older skill instructions
+must reload the updated skill. Explicit inbox/history commands remain available.
+
+Draft protection and terminal errors return failure. A failed submission stays
+unread and prints its message ID; partial submission is possible, so check the
+target and `agmsg history --id <id>` before recovery. There is no automatic
+retry or fallback to monitor. Concurrent sends to one recipient are refused
+while its submission lock is held. If a sender crashes, verify no submission
+is still running and inspect the target before removing the reported empty
+`run/poke-send.<hash>.lock` directory; do not automatically resend.
+
+To update, install the updated scripts and rendered skills together. To disable
+poke, select `agmsg mode off`; queued messages remain available through inbox.
+To restore the prior delivery method, select `agmsg mode monitor` or `mode turn`
+for that same project/type. To roll back to an older installation, first leave
+poke mode for both types, then restore the previous scripts/skills backup.
+No OS startup task, ACL change, or sandbox bypass is installed.
+
+### Codex monitor details
 
 > ⚠️ **Monitor mode changes how Codex starts — enable it knowing that.** Codex has no Monitor tool, so `mode monitor` prints a shell function that makes `codex` route through agmsg's monitor shim in your interactive shell. In monitor-mode projects the shim routes interactive launches through a bridge that turns incoming agmsg messages into turns on the current Codex thread; `codex exec` and non-monitor projects pass straight through to the real Codex. It depends on Codex app-server behavior and has a known limitation (orphans on TUI close — #149).
 

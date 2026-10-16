@@ -70,6 +70,53 @@ agmsg_codex_stop_attached() {
   done <<< "$pairs"
 }
 
+agmsg_delivery_on_poke() {
+  local project="$2" pairs team name thread request line temp node
+  # Old launchers already running must also see the deselection. Keep the
+  # seat's app-server and its lifetime dispatcher; only retire subscriptions.
+  # shellcheck source=_seat-key.sh
+  . "$SCRIPT_DIR/drivers/types/codex/_seat-key.sh"
+  # shellcheck source=../../../lib/role-session.sh
+  . "$SCRIPT_DIR/lib/role-session.sh"
+  pairs="$("$SCRIPT_DIR/identities.sh" "$project" codex)"
+  node="$(agmsg_resolve_node)"
+  while IFS=$'\t' read -r team name _rest; do
+    [ -n "$team" ] && [ -n "$name" ] || continue
+    agmsg_role_session_load "$team" "$name" 2>/dev/null || true
+    thread="${AGMSG_ROLE_SESSION_UUID:-}"
+    [ -n "$thread" ] || continue
+    [ "$(agmsg_poke_mode_path codex "${AGMSG_ROLE_SESSION_PROJECT:-}")" = "$(agmsg_poke_mode_path codex "$project")" ] || continue
+    for request in "$RUN_DIR"/codex-bridge-request.*; do
+      [ -f "$request" ] || continue
+      line=""; IFS= read -r line < "$request" || true
+      _agmsg_codex_request_parse "$line" || continue
+      [ "$AGMSG_CODEX_REQUEST_THREAD" = "$thread" ] && [ "$AGMSG_CODEX_REQUEST_TEAM" = "$team" ] && [ "$AGMSG_CODEX_REQUEST_NAME" = "$name" ] || continue
+      temp="$(mktemp "$RUN_DIR/poke-request.XXXXXX")"
+      printf 'codex\t%s\t%s\t\n' "$thread" "$AGMSG_CODEX_REQUEST_APP_SERVER" > "$temp"
+      mv "$temp" "$request"
+    done
+    case "$(uname -s)" in
+      MINGW*|MSYS*|CYGWIN*)
+        "$node" "$(cygpath -m "$SCRIPT_DIR/drivers/types/codex/monitor-control.js")" stop \
+          "$(cygpath -m "$project")" "$team" "$name" "$thread" || return 1
+        ;;
+    esac
+    # A retiring launcher/bridge must finish its in-flight watch before sends
+    # may use poke. Checking a PID here never signals it or tears down its TUI.
+    local pid attempt=0
+    while [ "$attempt" -lt 100 ]; do
+      pid="$(cat "$RUN_DIR/codex-bridge.$team.$name.pid" 2>/dev/null || true)"
+      [ -n "$pid" ] && _agmsg_pid_alive "$pid" || break
+      sleep 0.1
+      attempt=$((attempt + 1))
+    done
+    if [ -n "$pid" ] && _agmsg_pid_alive "$pid"; then
+      echo "agmsg: monitor for $team/$name has not stopped; poke remains pending. Check mode status before retrying." >&2
+      return 1
+    fi
+  done <<< "$pairs"
+}
+
 agmsg_delivery_on_turn() {
   case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) agmsg_codex_stop_attached "$2" ;;
@@ -253,6 +300,14 @@ agmsg_codex_report_missing_bridge() {
 agmsg_delivery_runtime_status() {
   local type="$1" project="$2"
   local pairs found=0 any_alive=0
+  local native_node="" current_thread confirmed_pid
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      native_node="$(agmsg_resolve_node)"
+      # shellcheck disable=SC1091
+      . "$SKILL_DIR/scripts/lib/role-session.sh"
+      ;;
+  esac
   _AGMSG_CODEX_LOADED_PROBED=""
   _AGMSG_CODEX_LOADED_COUNT=""
   _AGMSG_CODEX_LOADED_LIST=""
@@ -268,6 +323,17 @@ agmsg_delivery_runtime_status() {
       continue
     fi
     found=1
+
+    if [ -n "$native_node" ]; then
+      current_thread="$(agmsg_role_session_uuid "$team" "$name" 2>/dev/null || true)"
+      if [ -n "$current_thread" ] && confirmed_pid="$("$native_node" \
+        "$(cygpath -m "$SCRIPT_DIR/drivers/types/codex/monitor-control.js")" status \
+        "$(cygpath -m "$project")" "$team" "$name" "$current_thread" 2>/dev/null)"; then
+        echo "Codex bridge: $team/$name receiving (pid $confirmed_pid; thread $current_thread)"
+        any_alive=1
+        continue
+      fi
+    fi
 
     local base pidfile metafile pid meta_pid meta_project meta_type meta_ok want_proj have_proj
     base="$RUN_DIR/codex-bridge.$team.$name"

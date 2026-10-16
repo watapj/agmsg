@@ -458,6 +458,25 @@ _wait_exit() {  # <pid> <tenths>
   ! grep -q "M0-history" "$TEST_SKILL_DIR/fresh2.log"
 }
 
+@test "watch: a truncated notification retains an id for exact full-text recovery" {
+  export SKILL_DIR="$TEST_SKILL_DIR"
+  source "$SCRIPTS/lib/storage.sh"
+  agmsg_storage_load
+  local body id out="$TEST_SKILL_DIR/recovery.log" prefix
+  body="recovery-head-$(printf 'x%.0s' {1..600})-recovery-tail"
+  id=$(storage_send team bob alice "$body")
+  run_watcher_until "recovery-session" "$out" "recovery-tail"
+  prefix=$(head -c 500 "$out")
+  [[ "$prefix" == *"[id=$id]"* ]]
+  [[ "$prefix" != *"recovery-tail"* ]]
+  run bash "$SCRIPTS/inbox.sh" team alice
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"No new messages."* ]]
+  run bash "$SCRIPTS/history.sh" team alice --id "$id"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"$body"* ]]
+}
+
 @test "watch: exits when its session dies without consuming an undelivered row (#67)" {
   skip_on_windows "watcher session liveness under Git Bash (#182)"
   # REWRITTEN from "closed consumer does not advance watermark...". The old test

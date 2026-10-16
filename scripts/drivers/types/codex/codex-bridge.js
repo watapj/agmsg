@@ -1777,6 +1777,9 @@ class CodexBridge {
         "",
         this.inlineInboxText.trim(),
         "",
+        "These messages were already read by the bridge. Use the text above; do not check the inbox again for them.",
+        "When only waiting for another agent, finish this turn and let monitor delivery wake this thread.",
+        "",
         "Continue the conversation in this Codex thread. If a reply to an agmsg sender is needed, send it with:",
         `${send} ${this.identity.team} ${this.identity.name} <to> <message>`,
       ].join("\n");

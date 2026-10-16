@@ -239,7 +239,10 @@ agmsg_role_session_record "$TEAM" "$AGENT" "$thread" "$project_phys" codex "${AG
 # record even when SessionStart did not run. A recovered app-server is required
 # for a non-empty pair; without it, publish an empty-pair tombstone to retire
 # any stale role selection and let a later hook retry with the endpoint.
-if [ -n "${AGMSG_CODEX_SEAT_KEY:-}" ] && _agmsg_codex_seat_key_ok "$AGMSG_CODEX_SEAT_KEY"; then
+# shellcheck source=../../../lib/poke-mode.sh
+. "$SCRIPT_DIR/../../../lib/poke-mode.sh"
+poke_marker="$(agmsg_poke_mode_path codex "$PROJECT")"
+if [ ! -f "$poke_marker" ] && [ -n "${AGMSG_CODEX_SEAT_KEY:-}" ] && _agmsg_codex_seat_key_ok "$AGMSG_CODEX_SEAT_KEY"; then
   request_file="$SKILL_DIR/run/codex-bridge-request.$AGMSG_CODEX_SEAT_KEY"
   request_server="$(_agmsg_codex_app_server_url "$PROJECT" 2>/dev/null || true)"
   request_tmp="$request_file.$$"

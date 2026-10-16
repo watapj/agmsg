@@ -26,7 +26,8 @@ setup() {
   cat > "$STUB_DIR/cygpath" <<'STUB'
 #!/bin/sh
 case "$2" in
-  /c/*) printf %s "C:${2#/c}" ;;
+  /c/*)
+    if [ "$1" = -w ]; then printf %s "C:${2#/c}" | tr '/' '\\'; else printf %s "C:${2#/c}"; fi ;;
   *) printf %s "$2" ;;
 esac
 STUB
@@ -85,6 +86,16 @@ teardown() { teardown_test_env; }
   PATH="$STUB_DIR:$PATH"
   . "$SCRIPTS/lib/compat.sh"
   run agmsg_cmdline_names_path "" "$ENGINE_PATH"
+  [ "$status" -ne 0 ]
+}
+
+@test "cmdline-path: native backslash argv matches only the requested Windows path" {
+  PATH="$STUB_DIR:$PATH"
+  . "$SCRIPTS/lib/compat.sh"
+  local native_cmd='bash.exe C:\Users\u\.agents\skills\agmsg\scripts\internal\remote-sync.mjs run'
+  run agmsg_cmdline_names_path "$native_cmd" "$ENGINE_PATH"
+  [ "$status" -eq 0 ]
+  run agmsg_cmdline_names_path "$native_cmd" /c/Users/u/.agents/skills/agmsg/scripts/internal/other.mjs
   [ "$status" -ne 0 ]
 }
 

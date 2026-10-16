@@ -81,6 +81,12 @@ Four possible outputs:
 
 ## Execute
 
+**Poke delivery.** In `mode poke`, ordinary `send` automatically submits only the message body to the receiving pane. Do not add a sender prefix, notification wrapper, suffix, or inbox instruction. Do not follow a successful send with a second manual poke. Finish the turn when only waiting for a reply; do not start Monitor or poll inbox/peek/team. Explicit user inbox requests still work. A failed send may have saved an unread message or partially submitted it: inspect the reported ID and target once before recovery, never resend automatically. A submission receipt confirms terminal acceptance, not model completion; retain any required acknowledgement.
+
+**Monitor delivery and waiting.** A monitor event containing message text has already delivered that message and advanced its read state. Use the supplied text directly; do not call `inbox` again merely because that event arrived. An explicit user request to check the inbox still runs normally. When a notification is truncated, use its `[id=...]` with `history.sh <team> <recipient> --id <id>` to read that one message without changing read state; do not search recent history repeatedly or retry an empty inbox for an already delivered message. Older notifications without an ID can be recovered from history once.
+
+With a healthy monitor, wait for its next event instead of repeatedly checking `inbox`, `peek`, or `team` for a reply. If delivery appears broken, check runtime status once and use the supported recovery path; sending a message alone does not prove receipt. Use `poke` for an explicit request or a diagnosed delivery problem, not as a routine second copy after `send`. A healthy monitor does not remove required acknowledgements or explicit verification steps.
+
 **Only use scripts in `~/.agents/skills/__SKILL_NAME__/scripts/` — do not read or modify files under `teams/` or `db/` directly.** Treat the storage layout as internal: never construct a database path or invoke `sqlite3` directly. The scripts resolve the active store, including `AGMSG_STORAGE_PATH` overrides.
 
 **Terminal/pane self-awareness.** Asked about this session's own terminal, pane, or driver — or before using `arrange`, `peek`, or `poke` below — run `where.sh` (see the "where" argument below) first and answer from its `terminal=`/`capabilities=` fields. Never infer the driver from environment variables or a `grep`/`ps` guess: that is how a session under a real driver ends up reporting a false negative about its own placement, or claiming a capability or a whole driver does not exist when it does (#1171). Each driver's own operational detail lives in `~/.agents/skills/__SKILL_NAME__/scripts/drivers/terminals/<terminal>/README.md`, named by `where.sh`'s own `terminal=` field — never guessed at from a remembered syntax.
@@ -98,6 +104,9 @@ Asked about a *teammate's* placement or status, or what can be done to one, that
 
 If argument is "history":
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/history.sh $TEAM $AGENT`
+
+If argument starts with "history --id" followed by a message ID:
+1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/history.sh $TEAM $AGENT --id <id>`. This recovers that exact message, including a message already marked read.
 
 If argument starts with "team list" (e.g. "team list", "team list --json", "team list --scope project"):
 1. Run: `~/.agents/skills/__SKILL_NAME__/scripts/team-list.sh <the rest of the args after "team list", unchanged>`

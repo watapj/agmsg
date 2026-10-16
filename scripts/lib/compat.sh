@@ -93,7 +93,11 @@ agmsg_cmdline_names_path() {
   [ -n "$native" ] || return 1
   # Identical forms would make this second look a copy of the first, not a
   # second chance at it.
-  [ "$native" != "$path" ] || return 1
+  case "$cmdline" in *"$native"*) return 0 ;; esac
+  # A Bash launched by a native caller can retain backslash argv in /proc.
+  # Check the Windows form too; never normalize arbitrary command text.
+  native="$(cygpath -w "$path" 2>/dev/null || true)"
+  [ -n "$native" ] || return 1
   case "$cmdline" in *"$native"*) return 0 ;; esac
   return 1
 }

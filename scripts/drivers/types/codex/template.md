@@ -22,6 +22,10 @@ If argument starts with "actas" followed by an agent name:
 3. Use the role as the active FROM; monitor delivery is routed only to its recorded thread.
 <!-- /agmsg:slot actas -->
 
+<!-- agmsg:slot execute-extra -->
+When the Codex bridge supplies unread message text inline, process that text directly. If the only remaining action is waiting for another agent and monitor receiving has been confirmed, finish the current turn so the bridge can deliver the next message. Do not keep the turn alive with repeated inbox/peek polling. Check runtime status and recover delivery when there is evidence of a failure.
+<!-- /agmsg:slot execute-extra -->
+
 <!-- agmsg:slot drop -->
 If argument starts with "drop", run `reset.sh "$(pwd)" __AGENT_TYPE__ <name>` and clear the role's recorded Codex seat.
 <!-- /agmsg:slot drop -->
@@ -47,7 +51,9 @@ If argument starts with "despawn" (e.g. "despawn reviewer", "despawn alice --for
 <!-- agmsg:slot mode -->
 If argument is "mode", run `delivery.sh status __AGENT_TYPE__ "$(pwd)"`.
 
-For `mode monitor|turn|off`, run `delivery.sh set <mode> __AGENT_TYPE__ "$(pwd)"`; `both` is unsupported. Legacy `hook on` maps to `turn`; `hook off` maps to `off`.
+For `mode monitor|turn|off|poke`, run `delivery.sh set <mode> __AGENT_TYPE__ "$(pwd)"`; `both` is unsupported. Legacy `hook on` maps to `turn`; `hook off` maps to `off`.
+
+`mode poke` disables monitor and turn hooks for this project/type, and stops bridge subscriptions while keeping the Codex TUI/app-server alive. It requires an addressable terminal pane. On Windows, use the supported command escalation if writing project settings is refused. Do not launch a bridge or poll inbox after selecting poke.
 
 On Windows, execute `delivery.sh set monitor` outside the tool sandbox, using the supported command escalation when required. Choose the active FROM role with `actas` first if this thread has no unique recorded role. This command starts receiving in the current thread; do not launch a second `codex-monitor.sh` from inside Codex. Only report receiving when the command prints `Codex monitor receiving:`. If the current thread is embedded, is not loaded on the reachable server, or belongs to another project, report that activation failed. An ordinary, non-administrator Codex 0.163 session using its shared app-server supports attachment; `--no-daemon`, administrator launches and some custom launch options can use an embedded server instead.
 <!-- /agmsg:slot mode -->

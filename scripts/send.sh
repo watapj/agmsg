@@ -134,12 +134,49 @@ if [ "$FORCE" -ne 1 ]; then
   _agmsg_roster_check "to" "$TO" || exit 1
 fi
 
+# Resolve the receiving registration, not this sender's type or project.
+SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=lib/poke-mode.sh
+. "$SCRIPT_DIR/lib/poke-mode.sh"
+POKE_MODE=0
+POKE_RC=0
+agmsg_poke_target "$TEAM" "$TO" || POKE_RC=$?
+case "$POKE_RC" in 0) POKE_MODE=1 ;; 1) ;; *) exit 1 ;; esac
+if [ "$POKE_MODE" = 1 ]; then
+  # Serialize submissions to the same composer, including the safety check.
+  # A crashed sender leaves a visible lock; never silently steal one or retry
+  # a possibly submitted message (terminal submission has no transaction ACK).
+  mkdir -p "$SKILL_DIR/run"
+  POKE_LOCK="$SKILL_DIR/run/poke-send.$(printf '%s\n%s' "$TEAM" "$TO" | agmsg_sha1).lock"
+  mkdir "$POKE_LOCK" 2>/dev/null || die "another poke send is active (or interrupted): $POKE_LOCK; check the target before retrying"
+  POKE_BODY=""
+  trap 'rm -f "${POKE_BODY:-}"; rmdir "$POKE_LOCK" 2>/dev/null || true' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM HUP
+fi
+
 # Write through the storage axis (§2.1 storage_send) — the active driver now owns
 # the message log (an append-only message_sent event), not a direct INSERT.
 # storage_send re-inits its schema idempotently before writing, which subsumes the
 # #114 concurrent first-write race the old path retried around (a process seeing
 # the DB file before the table exists just creates it).
 MSG_ID="$(storage_send "$TEAM" "$FROM" "$TO" "$BODY")"
+
+if [ "$POKE_MODE" = 1 ]; then
+  POKE_BODY="$(mktemp)"
+  printf '%s' "$BODY" > "$POKE_BODY"
+  if bash "$SCRIPT_DIR/poke.sh" "$TEAM" "$TO" --no-fallback --expect-project "$AGMSG_POKE_PROJECT" --body-file "$POKE_BODY"; then
+    if ! storage_mark_read_batch "$TEAM" "$TO" "$MSG_ID" >/dev/null; then
+      die "poke submitted message $MSG_ID, but its read receipt failed; check history/target before recovery; do not resend automatically"
+    fi
+    echo "Submitted message $MSG_ID to $TO in team $TEAM (poke; model completion not confirmed)"
+    exit 0
+  else
+    POKE_RC=$?
+    echo "send: message $MSG_ID saved unread, but poke failed (rc $POKE_RC). Inspect the target before using inbox or retrying; partial submission is possible." >&2
+    exit "$POKE_RC"
+  fi
+fi
 
 echo "Sent to $TO in team $TEAM"
 

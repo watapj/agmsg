@@ -104,6 +104,12 @@ Four possible outputs:
 
 ## Execute
 
+**Poke delivery.** In `mode poke`, ordinary `send` automatically submits only the message body to the receiving pane. Do not add a sender prefix, notification wrapper, suffix, or inbox instruction. Do not follow a successful send with a second manual poke. Finish the turn when only waiting for a reply; do not start Monitor or poll inbox/peek/team. Explicit user inbox requests still work. A failed send may have saved an unread message or partially submitted it: inspect the reported ID and target once before recovery, never resend automatically. A submission receipt confirms terminal acceptance, not model completion; retain any required acknowledgement.
+
+**Monitor delivery and waiting.** A monitor event containing message text has already delivered that message and advanced its read state. Use the supplied text directly; do not call `inbox` again merely because that event arrived. An explicit user request to check the inbox still runs normally. When a notification is truncated, use its `[id=...]` with `history.sh <team> <recipient> --id <id>` to read that one message without changing read state; do not search recent history repeatedly or retry an empty inbox for an already delivered message. Older notifications without an ID can be recovered from history once.
+
+With a healthy monitor, wait for its next event instead of repeatedly checking `inbox`, `peek`, or `team` for a reply. If delivery appears broken, check runtime status once and use the supported recovery path; sending a message alone does not prove receipt. Use `poke` for an explicit request or a diagnosed delivery problem, not as a routine second copy after `send`. A healthy monitor does not remove required acknowledgements or explicit verification steps.
+
 **Only use scripts in `~/.agents/skills/agmsg/scripts/` — do not read or modify files under `teams/` or `db/` directly.** Treat the storage layout as internal: never construct a database path or invoke `sqlite3` directly. The scripts resolve the active store, including `AGMSG_STORAGE_PATH` overrides.
 
 **Terminal/pane self-awareness.** Asked about this session's own terminal, pane, or driver — or before using `arrange`, `peek`, or `poke` below — run `where.sh` (see the "where" argument below) first and answer from its `terminal=`/`capabilities=` fields. Never infer the driver from environment variables or a `grep`/`ps` guess: that is how a session under a real driver ends up reporting a false negative about its own placement, or claiming a capability or a whole driver does not exist when it does (#1171). Each driver's own operational detail lives in `~/.agents/skills/agmsg/scripts/drivers/terminals/<terminal>/README.md`, named by `where.sh`'s own `terminal=` field — never guessed at from a remembered syntax.
@@ -159,6 +165,9 @@ The allowlist does not enable sandboxing by itself. Use `/sandbox` in Claude Cod
 
 If argument is "history":
 1. Run: `~/.agents/skills/agmsg/scripts/history.sh $TEAM $AGENT`
+
+If argument starts with "history --id" followed by a message ID:
+1. Run: `~/.agents/skills/agmsg/scripts/history.sh $TEAM $AGENT --id <id>`. This recovers that exact message, including a message already marked read.
 
 If argument starts with "team list" (e.g. "team list", "team list --json", "team list --scope project"):
 1. Run: `~/.agents/skills/agmsg/scripts/team-list.sh <the rest of the args after "team list", unchanged>`
@@ -216,6 +225,7 @@ If argument starts with "actas" followed by an agent name (e.g. "actas alice"):
         - timeout_ms: 1800000
 
         This watch renews itself. A little before the 30-minute cap it prints one line on its own and exits: on `agmsg watch: re-arm - ...`, invoke Monitor again with exactly the command and description that line names (persistent: true, timeout_ms: 1800000), silently — no message to the user, no "re-armed", no acknowledgement, no summary, since announcing it every 30 minutes wastes tokens for no benefit; on `agmsg watch: stopping - ...`, do not re-arm it. If the watch is instead killed at the cap and no such line arrived (an agmsg install from before this), re-arm it only when the expiry notification says it delivered something.
+      - **`mode: poke`**: leave Monitor stopped; send already submits raw bodies to this pane. Do not poll inbox.
       - **`mode: turn`**: leave it stopped, silently. `has_st=1` is the one case `delivery.sh` can actually confirm was a deliberate choice — someone configured turn-based delivery for this project — so `actas` starting nothing here needs no explanation.
       - **`mode: off (no agmsg delivery hooks installed for this project)`**: leave it stopped (`actas` must not start automatic delivery a project wasn't configured for), but **do not treat this as silently deliberate**. `delivery.sh` cannot tell whether someone ran `mode off` here or this project was simply never configured — both leave the exact same settings file (#687 review round 3). **Tell the user** — e.g. "agmsg delivery hooks are not installed for this project; automatic delivery remains stopped. Run `/agmsg mode <choice>` if you want to configure it." Keep it matter-of-fact, not a warning. Do not report `actas` as complete without saying this.
       - **`mode: off (unrecognized: ...)`**: leave it stopped too (same rule — do not guess a mode), but this is a stronger case than the no-hooks-installed one above: `delivery.sh` could not even find or read a settings file for this project, most often because the working directory does not match how the project was actually registered. **Tell the user explicitly** — e.g. "agmsg could not find a delivery configuration for this project at `<path from the message>` — delivery is stopped, but this may mean the project isn't registered here rather than that it was deliberately turned off. Check the path, or run `/agmsg mode <choice>` to configure it explicitly." Do not report `actas` as complete without saying this — a silent stop here is indistinguishable from the other off cases and is what let this go unnoticed before (#687).
@@ -239,6 +249,7 @@ If argument starts with "drop" followed by an agent name (e.g. "drop alice"):
         - timeout_ms: 1800000
 
         This watch renews itself. A little before the 30-minute cap it prints one line on its own and exits: on `agmsg watch: re-arm - ...`, invoke Monitor again with exactly the command and description that line names (persistent: true, timeout_ms: 1800000), silently — no message to the user, no "re-armed", no acknowledgement, no summary, since announcing it every 30 minutes wastes tokens for no benefit; on `agmsg watch: stopping - ...`, do not re-arm it. If the watch is instead killed at the cap and no such line arrived (an agmsg install from before this), re-arm it only when the expiry notification says it delivered something.
+      - **`mode: poke`**: leave Monitor stopped; do not poll inbox.
       - **`mode: turn`**: leave it stopped, silently — the one case `delivery.sh` can confirm was deliberate.
       - **`mode: off (no agmsg delivery hooks installed for this project)`**: leave it stopped, but say so — same reasoning as the `actas` step this mirrors: this state is indistinguishable from "never configured" (#687 review round 3), so do not report it as deliberate. Do not report the drop as complete without mentioning it.
       - **`mode: off (unrecognized: ...)`**: leave it stopped, but say so with the stronger diagnostic — same reasoning as the `actas` step this mirrors (#687). Do not report the drop as complete without mentioning it.
@@ -290,7 +301,9 @@ If argument starts with "poke" (e.g. "poke reviewer status?"):
 
 If argument is "mode", run `~/.agents/skills/agmsg/scripts/delivery.sh status claude-code "$(pwd)"`. Show the output to the user, and if it says `mode: monitor` (or `both`), say explicitly that this reports project *configuration* only — it does not prove the runtime Monitor task is attached in the current session. To confirm the runtime state, look for a Monitor whose description begins with `agmsg inbox stream` (after an `actas` it reads `agmsg inbox stream (acting as <name>)`). TaskList may list this task, but not every environment does (the desktop app's Code tab runs the Monitor and delivers its events without listing it), so a task missing from TaskList is not a failure: judge by the Monitor call starting and its events arriving. The background-task footer is not a reliable check either.
 
-For `mode monitor|turn|both|off`, run `delivery.sh set <mode> claude-code "$(pwd)"` and follow its `AGMSG-DIRECTIVE` block. Legacy `hook on` maps to `turn`; `hook off` maps to `off`.
+For `mode monitor|turn|both|off|poke`, run `delivery.sh set <mode> claude-code "$(pwd)"` and follow its `AGMSG-DIRECTIVE` block. Legacy `hook on` maps to `turn`; `hook off` maps to `off`.
+
+`mode poke` disables monitor and turn hooks for this project/type. Stop this session's known agmsg Monitor task as directed; do not start another Monitor or poll inbox. Ordinary sends to this project/type now submit raw bodies through poke. An addressable terminal pane is required.
 
 If argument is "fix" (no further words):
 1. Run: `~/.agents/skills/agmsg/scripts/fix.sh` — with NO arguments. `fix` repairs THIS session's own seat marks (placement record, pane label, agent key, session name) at the pane the seat PROVES it is in. It takes no location: the seat establishes where it is from its own process ancestry (and, when that cannot decide, by writing a token to its own screen and finding it), and when it cannot establish that, it writes nothing and says why. Whoever invokes it — a `poke` from another member, a person at the keyboard, or this skill — gets the same answer. Passing a pane, a `--pane`, or any word is refused by name: a location handed in from outside is exactly the mistake this exists to remove.

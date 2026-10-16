@@ -20,6 +20,7 @@ set -euo pipefail
 #   monitor  — SessionStart hook → Claude Code Monitor tool → watch.sh stream
 #   turn     — Stop hook → check-inbox.sh between turns (legacy)
 #   both     — monitor primary; turn as per-session safety net
+#   poke     — send submits raw bodies to the receiving pane, no polling
 #   off      — no automatic delivery
 #
 # `status` reports configured delivery hooks. For Claude Code, `mode: monitor`
@@ -58,6 +59,8 @@ RUN_DIR="$SKILL_DIR/run"
 . "$SCRIPT_DIR/lib/hash.sh"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/lib/type-registry.sh"
+# shellcheck source=lib/poke-mode.sh
+. "$SCRIPT_DIR/lib/poke-mode.sh"
 # storage.sh provides agmsg_sqlite_mem (CR-safe sqlite, #180); hooks-json.sh's
 # primitives use it, so source storage first.
 # shellcheck disable=SC1091
@@ -279,12 +282,12 @@ agmsg_delivery_apply_default() {
         add_event_entry_file "$tmp_state" "PostToolUse" "$st $(_agmsg_shq "PostToolUse")" "$ww"
       fi
       ;;
-    off)
+    off|poke)
       : # already stripped
       ;;
     *)
       rm -f "$tmp_state"
-      echo "Unknown mode: $mode (use monitor|turn|both|off)" >&2
+      echo "Unknown mode: $mode (use monitor|turn|both|off|poke)" >&2
       return 1
       ;;
   esac
@@ -508,6 +511,14 @@ agmsg_delivery_status_default() {
       fi
     else
       mode="off (unrecognized: settings file at $hf could not be read as valid JSON)"
+    fi
+  fi
+  local poke_marker
+  poke_marker="$(agmsg_poke_mode_path "$type" "$project" 2>/dev/null || true)"
+  if [ -n "$poke_marker" ] && [ -f "$poke_marker" ]; then
+    mode="poke (setup incomplete; rerun mode poke)"
+    if [ "$hf_readable" = 1 ] && [ "$has_ss" = 0 ] && [ "$has_st" = 0 ] && [ "$(cat "$poke_marker")" = ready ]; then
+      mode=poke
     fi
   fi
   echo "mode: $mode"
@@ -850,11 +861,11 @@ do_set() {
   # from it) runs. See agmsg_validate_project_path above (#493).
   PROJECT="$(agmsg_validate_project_path "$PROJECT")" || exit 1
 
-  # Two-stage validation. First: is this even a real mode? The four mode names
+  # Two-stage validation. First: is this even a real mode? These mode names
   # are engine vocabulary (not type-specific), so a typo is caught here with a
   # generic message before any per-type logic.
-  case "$MODE" in monitor|turn|both|off) ;; *)
-    echo "Unknown mode: $MODE (use monitor|turn|both|off)" >&2; exit 1 ;;
+  case "$MODE" in monitor|turn|both|off|poke) ;; *)
+    echo "Unknown mode: $MODE (use monitor|turn|both|off|poke)" >&2; exit 1 ;;
   esac
   # Second: does THIS type accept the mode? A type declares the modes its CLI
   # accepts via the delivery_modes= manifest key (e.g. codex omits 'both' — the
@@ -872,11 +883,34 @@ do_set() {
       exit 1 ;;
   esac
 
+  local poke_marker poke_tmp was_poke=0
+  poke_marker="$(agmsg_poke_mode_path "$TYPE" "$PROJECT" 2>/dev/null || true)"
+  if [ -n "$poke_marker" ] && [ -f "$poke_marker" ]; then was_poke=1; fi
+  if [ "$MODE" = poke ]; then
+    mkdir -p "$RUN_DIR"
+    poke_tmp="$(mktemp "$RUN_DIR/delivery-poke.XXXXXX")"
+    printf 'pending\n' > "$poke_tmp"
+    mv "$poke_tmp" "$poke_marker"
+  fi
   apply_settings "$TYPE" "$PROJECT" "$MODE"
+  if [ "$MODE" != poke ] && [ -n "$poke_marker" ]; then rm -f "$poke_marker"; fi
 
   echo "Delivery mode set to '$MODE' for $PROJECT ($TYPE)"
 
   case "$MODE" in
+    poke)
+      # Stop delivery only. In particular, keep Codex's TUI/app-server alive.
+      if declare -F agmsg_delivery_on_poke >/dev/null 2>&1; then
+        agmsg_delivery_on_poke "$TYPE" "$PROJECT"
+      fi
+      kill_all_watchers "$PROJECT" "$TYPE" wait >/dev/null
+      agmsg_delivery_stop_directive
+      poke_tmp="$(mktemp "$RUN_DIR/delivery-poke.XXXXXX")"
+      printf 'ready\n' > "$poke_tmp"
+      mv "$poke_tmp" "$poke_marker"
+      echo 'send now submits the raw body to this project/type through poke; no monitor or inbox polling.'
+      echo 'An addressable terminal pane is required. Failed submissions remain unread; do not automatically resend.'
+      ;;
     monitor|both)
       # Type-specific enable side effects (shim install, watcher directive, …)
       # live in the type's plug as agmsg_delivery_on_enable; default is none.
@@ -896,7 +930,11 @@ do_set() {
       echo "Future sessions: no automatic delivery."
       # Type-specific teardown via the plug (default: stop this project's
       # watchers; codex stops its bridge instead).
-      agmsg_delivery_on_disable "$TYPE" "$PROJECT"
+      if [ "$was_poke" = 1 ] && declare -F agmsg_delivery_on_poke >/dev/null 2>&1; then
+        agmsg_delivery_on_poke "$TYPE" "$PROJECT"
+      else
+        agmsg_delivery_on_disable "$TYPE" "$PROJECT"
+      fi
       # Only emit the in-session watcher-stop directive for types that actually
       # have an automatic delivery mode to stop. A manual-only type
       # (delivery_modes=off, e.g. hermes) has no Monitor/watcher, so the
@@ -963,6 +1001,7 @@ do_status() {
   local TYPE="${1:-}"
   local PROJECT="${2:-}"
   local SESSION_ID="${3:-}"
+  local poke_ready=0 poke_marker=""
 
   # Mode is derived from the project's settings.local.json — there's no
   # global mode value. When called without <type> <project>, we can't infer
@@ -973,8 +1012,13 @@ do_status() {
   if [ -n "$TYPE" ] && [ -n "$PROJECT" ]; then
     agmsg_delivery_load_plug "$TYPE"
     agmsg_delivery_status "$TYPE" "$PROJECT"
+    poke_marker="$(agmsg_poke_mode_path "$TYPE" "$PROJECT" 2>/dev/null || true)"
+    if [ -n "$poke_marker" ] && [ -f "$poke_marker" ] && [ "$(cat "$poke_marker")" = ready ]; then poke_ready=1; fi
     case "$TYPE" in
       claude-code)
+        if [ "$poke_ready" = 1 ]; then
+          echo 'note: raw terminal delivery; no Monitor or inbox polling.'
+        else
         cat <<'EOF'
 note: status reports configured hooks only. For real-time delivery, Claude Code
 must also have a generic Monitor task running in the current session whose
@@ -983,11 +1027,16 @@ stream (acting as <name>)"). TaskList may list this task, but not every environm
 as a shell/background/nohup task instead of through the Monitor tool is not
 real-time delivery even while its process stays alive.
 EOF
+        fi
         ;;
     esac
   fi
 
-  agmsg_delivery_runtime_status "$TYPE" "$PROJECT"
+  if [ "$poke_ready" = 1 ]; then
+    echo 'monitor subscriptions: disabled (poke mode)'
+  else
+    agmsg_delivery_runtime_status "$TYPE" "$PROJECT"
+  fi
 
   print_terminal_status "$SESSION_ID"
 }
@@ -1001,7 +1050,7 @@ kill_all_watchers() {
   # tears down another project's watcher OR another agent type's watcher in the
   # SAME project — which, because claude-code is the only type with a watcher,
   # is exactly the collateral kill that a non-claude `set turn` used to cause.
-  local project="${1:-}" type="${2:-}"
+  local project="${1:-}" type="${2:-}" wait_for_exit="${3:-}"
   local killed=0
   # The argv substring to scope to: "<project> <type>" when a type is given
   # (exact adjacent fields), else just "<project>", else empty (match all).
@@ -1024,12 +1073,44 @@ kill_all_watchers() {
           # match this (project, type) — i.e. other projects, and other types
           # in the same project.
           if [ -n "$needle" ]; then
+            local scope_ok=0
             case " $cmd " in
-              *"$needle"*) ;;
-              *) continue ;;
+              *"$needle"*) scope_ok=1 ;;
             esac
+            if [ "$wait_for_exit" = wait ] && [ "$scope_ok" = 0 ]; then
+              local filter="$RUN_DIR/$(basename "${f%.pid}").filter" role filter_project filter_pid
+              # Poke transitions also use atomic owner metadata to handle
+              # native/MSYS path aliases and quoted paths with spaces.
+              if [ -f "$filter" ]; then
+                { IFS= read -r role; IFS= read -r filter_project; IFS= read -r filter_pid; } < "$filter" || true
+                if [ "${filter_pid:-}" = "$pid" ] && \
+                  [ "$(agmsg_poke_mode_path "$type" "${filter_project:-}")" = "$(agmsg_poke_mode_path "$type" "$project")" ]; then
+                  case " $cmd " in *" $type "*|*" \"$type\" "*) scope_ok=1 ;; esac
+                fi
+              fi
+            fi
+            [ "$scope_ok" = 1 ] || continue
           fi
-          kill "$pid" 2>/dev/null && killed=$((killed + 1))
+          if kill "$pid" 2>/dev/null; then
+            killed=$((killed + 1))
+          elif [ "$wait_for_exit" = wait ]; then
+            echo "agmsg: could not stop watcher $pid; poke setup remains pending." >&2
+            return 1
+          fi
+          if [ "$wait_for_exit" = wait ]; then
+            local attempt=0
+            while _agmsg_pid_alive_local "$pid" && [ "$attempt" -lt 100 ]; do
+              sleep 0.1
+              attempt=$((attempt + 1))
+            done
+            if _agmsg_pid_alive_local "$pid"; then
+              echo "agmsg: watcher $pid has not stopped; poke setup remains pending." >&2
+              return 1
+            fi
+          fi
+        elif [ "$wait_for_exit" = wait ]; then
+          echo "agmsg: cannot verify watcher $pid; leaving it untouched. Poke setup remains pending; inspect its owner before retrying." >&2
+          return 1
         fi   # otherwise it is not our watcher; leave it
       fi
       rm -f "$f"
