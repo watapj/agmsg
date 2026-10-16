@@ -132,18 +132,31 @@ windows_wrap() {
   printf '%s' "\$b=\$env:GIT_BASH; if (-not \$b) { \$b=\$env:AGMSG_BASH }; if (-not \$b) { \$b='C:\\Program Files\\Git\\bin\\bash.exe' }; \$o=[IO.Path]::GetTempFileName(); \$s=[IO.Path]::GetTempFileName(); [IO.File]::WriteAllText(\$s,'$bash_cmd_ps',(New-Object System.Text.UTF8Encoding \$false)); \$env:AGMSG_HOOK_OUT=\$o; & \$b -l (\$s.Replace('\\','/')) | Out-Null; \$rc=\$LASTEXITCODE; Get-Content -Raw -LiteralPath \$o; Remove-Item -Force -LiteralPath \$o,\$s -ErrorAction SilentlyContinue; exit \$rc"
 }
 
-# Append a single entry of the form {"matcher":"","hooks":[{"type":"command","command":"<cmd>"}]}
-# to .hooks.<event> in the JSON at <path>, creating arrays/objects as needed.
-# When the 4th arg is "yes" the entry also carries a "commandWindows" so the hook
-# runs on native Windows; otherwise it is omitted. This layer stays type-agnostic
-# — the caller (delivery.sh) decides from the type manifest whether to wrap.
-# Writes the result back to <path>. As with strip_agmsg_event_file, the settings
-# are read via readfile() rather than via argv (#95).
+# Native Windows SessionStart/SessionEnd transport. Values are PowerShell
+# single-quoted literals, independently of the POSIX command's quoting.
+windows_enqueue_wrap() {
+  local event="$1" type="$2" project="$3"
+  local enqueue_path="$SKILL_DIR/scripts/windows/hook-enqueue.ps1"
+  if command -v cygpath >/dev/null 2>&1; then
+    enqueue_path=$(cygpath -m "$enqueue_path")
+    project=$(cygpath -m "$project")
+  fi
+  enqueue_path=$(printf '%s' "$enqueue_path" | sed "s/'/''/g")
+  project=$(printf '%s' "$project" | sed "s/'/''/g")
+  type=$(printf '%s' "$type" | sed "s/'/''/g")
+  printf '%s' "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '$enqueue_path' -Event '$event' -Type '$type' -Project '$project'"
+}
+
+# Append a command entry to .hooks.<event>, preserving JSON/SQLite escaping.
+# Argument 4: yes = legacy Windows wrapper; queue = native lifecycle enqueue;
+# other values omit commandWindows. Queue takes type/project as arguments 5/6.
+# Stop/PostToolUse always retain the synchronous wrapper.
 add_event_entry_file() {
   local path="$1"
   local event="$2"
   local cmd="$3"
   local windows_wrap="${4:-}"
+  local hook_type="${5:-}" hook_project="${6:-}"
   local sql_path
   sql_path=$(agmsg_sql_readfile_path "$path")
 
@@ -156,9 +169,13 @@ add_event_entry_file() {
   local cmd_lit
   cmd_lit=$(printf '%s' "$cmd" | sed "s/'/''/g")
   local hook_obj="json_object('type','command','command','$cmd_lit'"
-  if [ "$windows_wrap" = "yes" ]; then
+  if [ "$windows_wrap" = "yes" ] || [ "$windows_wrap" = "queue" ]; then
     local cw cw_lit
-    cw=$(windows_wrap "$cmd")
+    case "$windows_wrap:$event" in
+      queue:SessionStart|queue:SessionEnd)
+        cw=$(windows_enqueue_wrap "$event" "$hook_type" "$hook_project") ;;
+      *) cw=$(windows_wrap "$cmd") ;;
+    esac
     cw_lit=$(printf '%s' "$cw" | sed "s/'/''/g")
     hook_obj="$hook_obj,'commandWindows','$cw_lit'"
   fi

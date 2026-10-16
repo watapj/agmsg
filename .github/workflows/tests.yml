@@ -808,6 +808,10 @@ jobs:
             filter: "windows-wrapper"
             target: tests/test_delivery.bats
             sqlite: true
+          - leg: codex hook queue
+            filter: "windows-hook-queue"
+            target: tests/test_windows_hook_queue.bats
+            sqlite: true
           - leg: driver input (#817)
             filter: "driver-input"
             target: tests/test_remote_sync_driver_input.bats

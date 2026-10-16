@@ -11,6 +11,19 @@
 
 agmsg_delivery_on_enable() {
   echo "Codex monitor is enabled."
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      echo "Windows lifecycle hooks require a dispatcher started OUTSIDE the Codex sandbox."
+      echo "In a normal PowerShell terminal (one -Project per allowed project):"
+      local dispatcher project_native
+      dispatcher="$(cygpath -m "$SKILL_DIR/scripts/windows/hook-dispatcher.ps1")"
+      project_native="$(cygpath -m "$3")"
+      dispatcher="${dispatcher//\'/\'\'}"
+      project_native="${project_native//\'/\'\'}"
+      echo "  & '$dispatcher' -Action Start -Project '$project_native'"
+      echo "Use -Action Status or -Action Stop with the same script to inspect or stop it."
+      ;;
+  esac
   echo "Add this shell function to your interactive shell profile, then restart the shell:"
   if "$SKILL_DIR/scripts/drivers/types/codex/codex-shim-install.sh" function; then
     echo "Future Codex sessions: launch with codex. In monitor-mode projects, the agmsg function routes interactive Codex sessions through the bridge."
