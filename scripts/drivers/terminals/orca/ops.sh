@@ -516,7 +516,7 @@ terminal_input_draft() {   # <id>
     echo "orca: could not read terminal '$id''s draft ($(_orca_error_code "$read_json"))" >&2
     return 12
   fi
-  local esc draft_type draft extract_rc encoded b64_rc _restore_e
+  local esc draft_type draft_hex extract_rc encoded b64_rc _restore_e
   esc="$(printf '%s' "$read_json" | sed "s/'/''/g")"
   draft_type="$(sqlite3 :memory: "SELECT json_type('$esc','\$.result.terminal.draft')" 2>/dev/null)"
   case "$draft_type" in
@@ -524,45 +524,32 @@ terminal_input_draft() {   # <id>
       return 0
       ;;
     text)
-      # NOT `_orca_json_field` (review, #1443): that helper's own
-      # `"$(sqlite3 ...)"` capture strips every trailing newline, which would
-      # silently truncate a draft ending in one before this function even gets
-      # to base64-encode it — one layer too early for the fix above to help.
-      # sqlite3's list-mode output also unconditionally appends its OWN
-      # row-terminator newline after the value, on top of whatever the value
-      # itself ends with. So: capture with `&&` and a non-newline sentinel
-      # (`&&`, not `;` — review, #1443 round 2: `; printf x` always succeeds,
-      # so a real sqlite3 failure would otherwise vanish into the command
-      # substitution's own always-0 exit status and this whole case would
-      # report a broken read as a confirmed empty draft). The sentinel only
-      # ever appears when sqlite3 itself exited 0, which is also what protects
-      # the payload's own trailing newline(s) from $(...)'s stripping; drop
-      # the sentinel, then drop exactly the ONE row-terminator newline sqlite3
-      # always adds, leaving the payload's own trailing newline(s) untouched.
+      # Transfer text as hex so SQLite's native Windows CRLF row terminator
+      # cannot become a phantom draft. Decode directly into base64: neither
+      # command substitution nor SQLite may strip/convert the draft's own
+      # trailing newlines. The SQL command's failure remains observable.
       #
       # Both assignments below read `$?`/exit status right after a bare
       # `x=$(cmd)` (CI: check-errexit-status-reads.sh) — under an inherited
       # `set -e` a failing command substitution kills the shell AT the
       # assignment, so the status read never runs and the rc12 handling below
-      # would never fire. `&&` inside the substitution does not protect the
-      # OUTER assignment statement itself. Lifted with the codebase's own
+      # would never fire. Lifted with the codebase's own
       # two-line pattern (`agmsg_terminal_load`, terminal-registry.sh) around
       # both, restored once after.
       _restore_e=0
       case $- in *e*) _restore_e=1 ;; esac
       set +e
-      draft="$(sqlite3 :memory: "SELECT json_extract('$esc','\$.result.terminal.draft')" 2>/dev/null && printf x)"
+      draft_hex="$(sqlite3 :memory: "SELECT hex(CAST(json_extract('$esc','\$.result.terminal.draft') AS BLOB))" 2>/dev/null)"
       extract_rc=$?
       if [ "$extract_rc" -eq 0 ]; then
-        draft="${draft%x}"
-        draft="${draft%$'\n'}"
+        draft_hex="${draft_hex//$'\r'/}"
         # A 2-stage pipe's own exit status (no `set -o pipefail` in this file)
         # is the LAST command's — base64's — so this needs no PIPESTATUS
         # gymnastics; a separate `tr -d '\n'` stage would (PIPESTATUS does not
         # survive a "$(...)" boundary), so base64's own line-wrapping (GNU
         # wraps at 76 cols by default, BSD/macOS does not) is stripped in pure
         # bash instead, on the OUTER shell's already-captured value.
-        encoded="$(printf '%s' "$draft" | base64)"
+        encoded="$(printf '%b' "$(printf '%s' "$draft_hex" | sed 's/../\\x&/g')" | base64)"
         b64_rc=$?
       fi
       [ "$_restore_e" = 1 ] && set -e
