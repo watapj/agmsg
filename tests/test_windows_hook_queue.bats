@@ -45,3 +45,9 @@ teardown() { teardown_test_env; }
   run python "$BATS_TEST_DIRNAME/test_windows_hook_queue.py"
   [ "$status" -eq 0 ]
 }
+
+@test "windows-hook-queue: current-session monitor activation" {
+  skip_unless_windows "requires native Windows named pipes and Git Bash"
+  run python "$BATS_TEST_DIRNAME/test_codex_monitor_activate.py"
+  [ "$status" -eq 0 ]
+}

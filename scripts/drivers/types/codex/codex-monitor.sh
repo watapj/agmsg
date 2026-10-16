@@ -254,7 +254,7 @@ _agmsg_codex_seat_record_write "$SEAT_RECORD" "$PROJECT_HASH" "$server_bg" "$POR
   exec_plain_codex
 }
 
-"$SCRIPT_DIR/../../../delivery.sh" set monitor codex "$PROJECT" >/dev/null
+AGMSG_CODEX_MONITOR_CONFIGURE_ONLY=1 "$SCRIPT_DIR/../../../delivery.sh" set monitor codex "$PROJECT" >/dev/null
 
 export AGMSG_CODEX_BRIDGE=1
 export AGMSG_CODEX_BRIDGE_APP_SERVER="$SOCKET_URL"

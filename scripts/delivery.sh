@@ -410,12 +410,14 @@ _agmsg_hooks_file_finish_write() {
 # (scripts/drivers/types/<name>/_delivery.sh) may override any subset of these:
 #   agmsg_delivery_apply      — write the hook file for a mode (default: JSON event-hooks)
 #   agmsg_delivery_on_enable  — side effects when enabling monitor/both (default: none)
+#   agmsg_delivery_on_turn    — side effects when switching to turn (default: none)
 #   agmsg_delivery_on_disable — side effects when turning delivery off  (default: none)
 #   agmsg_delivery_stop_directive — in-session watcher-stop directive (default: Claude TaskStop)
 #   agmsg_delivery_runtime_status — runtime liveness summary (default: watch.sh pidfiles)
 # A plug that wants the default apply can delegate to agmsg_delivery_apply_default.
 agmsg_delivery_apply() { agmsg_delivery_apply_default "$@"; }
 agmsg_delivery_on_enable() { :; }
+agmsg_delivery_on_turn() { :; }
 # Default 'off' teardown: stop this (project, type)'s watch.sh watchers. A type
 # with its own runtime (e.g. codex's bridge) overrides this. Args: <type>
 # <project>. Passing the type scopes the kill so disabling one type's delivery
@@ -881,6 +883,7 @@ do_set() {
       agmsg_delivery_on_enable "$MODE" "$TYPE" "$PROJECT"
       ;;
     turn)
+      agmsg_delivery_on_turn "$TYPE" "$PROJECT"
       echo "Future sessions: Stop hook will check inbox between turns."
       # Stop only THIS (project, type)'s watcher; other types in this project,
       # and other projects, keep theirs. (Before scoping, this killed every

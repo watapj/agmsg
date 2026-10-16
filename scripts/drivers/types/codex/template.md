@@ -12,7 +12,7 @@ Do not use POSIX `'"'"'` quote splicing in PowerShell, and do not use escaped do
 <!-- agmsg:render-overlay __AGENT_TYPE__ -->
   5. **REQUIRED — Do NOT skip this step.** Ask the user to pick `monitor`, `turn`, or `off` delivery. Empty input means `monitor`.
      Run `~/.agents/skills/__SKILL_NAME__/scripts/delivery.sh set <mode> __AGENT_TYPE__ "$(pwd)"`.
-     Monitor uses the Codex app-server bridge; it changes how `codex` starts and is documented in `docs/codex-monitor-beta.md`.
+     On Windows, run this command outside the tool sandbox (Git Bash cannot start inside it). It starts the native lifecycle dispatcher and attaches the bridge to this session's existing app-server; it reports receiving only after its watcher is armed. Select a role with `actas` first if none belongs to this thread. An embedded/`--no-daemon` session has no attachment endpoint; report the error and consult `docs/codex-monitor-beta.md`. Linux/macOS use the existing launch wrapper.
 <!-- /agmsg:slot delivery -->
 
 <!-- agmsg:slot actas -->
@@ -48,4 +48,6 @@ If argument starts with "despawn" (e.g. "despawn reviewer", "despawn alice --for
 If argument is "mode", run `delivery.sh status __AGENT_TYPE__ "$(pwd)"`.
 
 For `mode monitor|turn|off`, run `delivery.sh set <mode> __AGENT_TYPE__ "$(pwd)"`; `both` is unsupported. Legacy `hook on` maps to `turn`; `hook off` maps to `off`.
+
+On Windows, execute `delivery.sh set monitor` outside the tool sandbox, using the supported command escalation when required. Choose the active FROM role with `actas` first if this thread has no unique recorded role. This command starts receiving in the current thread; do not launch a second `codex-monitor.sh` from inside Codex. Only report receiving when the command prints `Codex monitor receiving:`. If the current thread is embedded, is not loaded on the reachable server, or belongs to another project, report that activation failed. An ordinary, non-administrator Codex 0.163 session using its shared app-server supports attachment; `--no-daemon`, administrator launches and some custom launch options can use an embedded server instead.
 <!-- /agmsg:slot mode -->

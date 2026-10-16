@@ -180,6 +180,12 @@ class HookQueueTests(unittest.TestCase):
                 self.fail(str(child.communicate()))
             time.sleep(0.05)
         self.assertIn("Dispatcher running", self.ps("hook-dispatcher.ps1", "-Action", "Status").stdout)
+        self.ps("hook-dispatcher.ps1", "-Action", "Start", "-Project", str(self.project))
+        other = self.root / "other-project"
+        other.mkdir()
+        result = self.ps("hook-dispatcher.ps1", "-Action", "Start", "-Project", str(other), check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not allowed", result.stderr)
         self.assertNotEqual(self.dispatch(check=False).returncode, 0)
         self.enqueue()
         deadline = time.monotonic() + 10

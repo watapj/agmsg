@@ -2,14 +2,25 @@
 # codex delivery plug.
 #
 # codex keeps the default JSON event-hooks apply (agmsg_delivery_apply); it adds
-# enable/disable side effects (print the monitor shim setup on enable, stop the
-# bridge on disable) and replaces the runtime status summary with Codex bridge
+# enable/disable side effects (attach to a running Windows session or print the
+# monitor shim setup, stop the bridge on disable) and reports Codex bridge
 # liveness. Sourced into delivery.sh's context, so SKILL_DIR, SCRIPT_DIR,
 # RUN_DIR, agmsg_resolve_node, CODEX_MONITOR_DOC_URL and stop_codex_bridge are
 # in scope.
 # Args (both hooks): on_enable <mode> <type> <project>; on_disable <type> <project>.
 
 agmsg_delivery_on_enable() {
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      if [ -n "${CODEX_THREAD_ID:-}" ] && [ "${AGMSG_CODEX_MONITOR_CONFIGURE_ONLY:-0}" != 1 ]; then
+        powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+          -File "$(cygpath -m "$SKILL_DIR/scripts/windows/hook-dispatcher.ps1")" \
+          -Action Start -Project "$(cygpath -m "$3")" || return 1
+        bash "$SCRIPT_DIR/drivers/types/codex/codex-monitor-activate.sh" "$3"
+        return $?
+      fi
+      ;;
+  esac
   echo "Codex monitor is enabled."
   case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
@@ -48,8 +59,28 @@ agmsg_delivery_on_enable() {
   echo "For more info: $CODEX_MONITOR_DOC_URL"
 }
 
+agmsg_codex_stop_attached() {
+  local project="$1" pairs team name node
+  node="$(agmsg_resolve_node)"
+  pairs="$("$SCRIPT_DIR/identities.sh" "$project" codex)"
+  while IFS=$'\t' read -r team name _rest; do
+    [ -n "$team" ] && [ -n "$name" ] || continue
+    "$node" "$(cygpath -m "$SCRIPT_DIR/drivers/types/codex/codex-bridge.js")" --project "$(cygpath -m "$project")" \
+      --pair "$team"$'\t'"$name" --stop-attached || return 1
+  done <<< "$pairs"
+}
+
+agmsg_delivery_on_turn() {
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) agmsg_codex_stop_attached "$2" ;;
+  esac
+}
+
 agmsg_delivery_on_disable() {
   local project="$2"
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) agmsg_codex_stop_attached "$project" || return 1 ;;
+  esac
   local stopped
   stopped=$(stop_codex_bridge "$project")
   if [ "${stopped:-0}" -gt 0 ]; then

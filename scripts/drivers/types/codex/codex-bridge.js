@@ -8,6 +8,7 @@ const net = require("net");
 const os = require("os");
 const path = require("path");
 const readline = require("readline");
+const { Duplex } = require("stream");
 
 const SCRIPT_DIR = __dirname;                              // .../scripts/drivers/types/codex (codex siblings live here)
 const SKILL_DIR = path.resolve(SCRIPT_DIR, "..", "..", "..", "..");    // skill root
@@ -95,7 +96,10 @@ Options:
   --watch-failure-limit <n>
                           Stop after n consecutive watch-once failures; 0 disables (default: 3).
   --app-server <url>      Connect through an existing app-server endpoint.
-                          Supports unix://PATH or ws://host:port over WebSocket.
+                          Supports unix://PATH, ws://host:port, or daemon://.
+  --activate-current     Windows: start receiving on this existing thread and
+                          return only after the watcher is armed.
+  --stop-attached        Windows: stop this role's activated monitor only.
   --thread <id|current|loaded>
                           Resume an existing app-server thread. "current" uses
                           CODEX_THREAD_ID; "loaded" discovers the live TUI thread
@@ -253,6 +257,12 @@ function parseArgs(argv) {
       opts.resolveOnly = true;
     } else if (arg === "--print-loaded-threads") {
       opts.printLoadedThreads = true;
+    } else if (arg === "--activate-current") {
+      opts.activateCurrent = true;
+    } else if (arg === "--attach-current") {
+      opts.attachCurrent = true;
+    } else if (arg === "--stop-attached") {
+      opts.stopAttached = true;
     } else if (arg === "--project") {
       opts.project = argv[++i];
     } else if (arg === "--workspace-root") {
@@ -332,9 +342,24 @@ function parseArgs(argv) {
     opts.threadId = process.env.CODEX_THREAD_ID || "";
     if (!opts.threadId) die("--thread current requires CODEX_THREAD_ID");
   }
+  if (opts.activateCurrent || opts.attachCurrent || opts.stopAttached) {
+    if (process.platform !== "win32") die("current-session activation is Windows only");
+    if (opts.type !== "codex") die("current-session activation requires agent type codex");
+    if (!opts.stopAttached && (!opts.threadId || opts.threadId === "loaded" || !opts.appServer)) {
+      die("current-session activation requires an exact thread and existing app-server");
+    }
+    if (!opts.stopAttached && !/^(daemon:\/\/$|ws:\/\/|unix:\/\/)/.test(opts.appServer)) {
+      die("current-session activation cannot start a new app-server");
+    }
+  }
   opts.project = path.resolve(opts.project);
   if (!fs.existsSync(opts.project) || !fs.statSync(opts.project).isDirectory()) {
     die(`project path is not a directory: ${opts.project}`);
+  }
+  if (opts.activateCurrent || opts.attachCurrent || opts.stopAttached) {
+    const converted = spawnSync(BASH_BIN, ["-c", 'cygpath -u "$1"', "_", opts.project], { encoding: "utf8" });
+    if (converted.error || converted.status !== 0) die("cannot convert current project to a Git Bash path");
+    opts.scriptProject = converted.stdout.replace(/\r?\n$/, "");
   }
   return opts;
 }
@@ -349,7 +374,7 @@ function runScript(script, args) {
 }
 
 function resolveIdentities(opts) {
-  const result = runScript("identities.sh", [toPosixPath(opts.project), opts.type]);
+  const result = runScript("identities.sh", [opts.scriptProject || toPosixPath(opts.project), opts.type]);
   if (result.status !== 0) {
     die(`identity resolution failed: ${(result.stderr || result.stdout).trim()}`);
   }
@@ -650,7 +675,17 @@ class WebSocketAppServerClient {
         if (timer.unref) timer.unref();
       }
 
-      this.socket = net.createConnection(this.connectOptions);
+      if (this.connectOptions.proxy) {
+        // `codex app-server proxy` relays raw WebSocket bytes, not JSONL. Reuse
+        // the same handshake/framing as a direct endpoint over its stdio pipes.
+        const child = spawn(BASH_BIN, ["-c", "exec codex app-server proxy"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+        this.socket = Duplex.from({ readable: child.stdout, writable: child.stdin });
+        child.stderr.on("data", writeErr);
+        child.on("error", (error) => this.socket.destroy(error));
+        child.on("exit", () => this.socket.destroy());
+        child.on("spawn", () => this.socket.emit("connect"));
+        this.socket.once("close", () => child.stdin.destroy());
+      } else this.socket = net.createConnection(this.connectOptions);
       this.socket.on("connect", () => {
         this.socket.write(
           [
@@ -1014,6 +1049,18 @@ class CodexBridge {
 
   async run() {
     fs.mkdirSync(RUN_DIR, { recursive: true });
+    if (process.platform === "win32") {
+      const control = require("./monitor-control");
+      this.controlServer = await control.listen(
+        control.address(SKILL_DIR, this.opts.project, this.identities),
+        () => ({ ready: !!this.monitorReady, attached: !!this.opts.attachCurrent,
+          thread: this.threadId, appServer: this.opts.appServer, pid: process.pid }),
+        async () => {
+          await this.shutdown();
+          setTimeout(() => process.exit(0), 100).unref();
+        },
+      );
+    }
     this.ensureSingleInstance();
     this.writeMeta();
     this.installSignals();
@@ -1073,7 +1120,33 @@ class CodexBridge {
     await this.armWatch();
     // After armWatch, not before: the seat is a claim that this role is being
     // delivered to, and until the watch is armed that is not yet true.
-    this.recordSeat();
+    if (!this.opts.attachCurrent) this.recordSeat();
+    this.monitorReady = true;
+    if (process.connected) process.send({ ready: true, thread: this.threadId, appServer: this.opts.appServer, pid: process.pid });
+    if (this.opts.attachCurrent) {
+      this.attachTimer = setInterval(() => {
+        if (this.attachCheckPending || this.stopping) return;
+        this.attachCheckPending = true;
+        this.checkCurrentThread().catch((error) => this.failClientHandler("current-session check", error))
+          .finally(() => { this.attachCheckPending = false; });
+      }, 5000);
+    }
+  }
+
+  async checkCurrentThread() {
+    const loaded = await this.client.request("thread/loaded/list", {});
+    if (!Array.isArray(loaded.data) || !loaded.data.includes(this.threadId)) {
+      throw new Error("current thread is not loaded on this server; embedded/--no-daemon sessions cannot attach");
+    }
+    const result = await this.client.request("thread/read", { threadId: this.threadId, includeTurns: false });
+    const cwd = result.thread && result.thread.cwd;
+    if (!cwd || fs.realpathSync(cwd).toLowerCase() !== fs.realpathSync(this.opts.project).toLowerCase()) {
+      throw new Error("current thread project does not match the requested project");
+    }
+    const role = runScript("drivers/types/codex/codex-monitor-activate.sh", ["--check", this.opts.scriptProject, this.threadId]);
+    if (role.status !== 0 || role.stdout.trim() !== `${this.identity.team}\t${this.identity.name}`) {
+      throw new Error("current thread no longer owns this role; run agmsg actas first");
+    }
   }
 
   // Write the seat from the thread the bridge actually armed on (#579). Seating
@@ -1126,6 +1199,10 @@ class CodexBridge {
       ].join("\n") + "\n",
     );
     this.writeLease();
+    if (this.opts.attachCurrent) {
+      fs.writeFileSync(this.pidfile.replace(/\.pid$/, ".appserver"), this.opts.appServer);
+      fs.writeFileSync(this.pidfile.replace(/\.pid$/, ".thread"), this.threadId);
+    }
   }
 
   // The reaper's authority. It is published atomically (temp + rename) so a
@@ -1196,7 +1273,7 @@ class CodexBridge {
     if (!token) throw new Error("cannot determine process start token for identity lease");
     const host = os.hostname();
     if (!host) throw new Error("cannot determine hostname for identity lease");
-    const projectHash = crypto.createHash("sha1").update(toPosixPath(this.opts.project)).digest("hex");
+    const projectHash = crypto.createHash("sha1").update(this.opts.scriptProject || toPosixPath(this.opts.project)).digest("hex");
     // Canonicalize the pair SET before hashing: hash each "team\tname" pair, then
     // sort the hex hashes (pure ASCII, so a byte sort in the launcher and a JS
     // code-unit sort here agree even for non-ASCII names) and hash the joined
@@ -1295,6 +1372,7 @@ class CodexBridge {
   }
 
   async ensureThread() {
+    if (this.opts.attachCurrent) await this.checkCurrentThread();
     if (this.threadId === "loaded") {
       this.threadId = await this.resolveLoadedThread();
       console.error(`codex-bridge: discovered loaded thread ${this.threadId}`);
@@ -1309,6 +1387,7 @@ class CodexBridge {
           excludeTurns: true,
         });
       } catch (err) {
+        if (this.opts.attachCurrent) throw err;
         // Codex 0.142+'s --remote sessions may not create a rollout, which
         // makes the thread/resume request itself fail outright. turn/start
         // only needs threadId, so keep the bridge alive by falling back to
@@ -1387,7 +1466,7 @@ class CodexBridge {
       // watch-once.sh resolves the subscription set through the same exact
       // project-key lookup as identities.sh, so it needs the POSIX form of the
       // project path. The spawn cwd below stays native for the app-server.
-      toPosixPath(this.opts.project),
+      this.opts.scriptProject || toPosixPath(this.opts.project),
       this.opts.type,
       "--timeout",
       String(this.opts.timeout),
@@ -1562,6 +1641,12 @@ class CodexBridge {
 
   async tryStartTurn() {
     if (!this.pendingWake || this.turnActive || !this.threadIdle) return;
+    if (this.opts.attachCurrent) {
+      if (this.attachTurnCheck) return;
+      this.attachTurnCheck = true;
+      try { await this.checkCurrentThread(); } finally { this.attachTurnCheck = false; }
+      if (this.stopping || !this.pendingWake || this.turnActive || !this.threadIdle) return;
+    }
     if (this.opts.inlineInbox) {
       this.inlineInboxText = this.readInboxForPrompt();
       if (!this.inlineInboxText.trim()) {
@@ -1709,7 +1794,7 @@ class CodexBridge {
     // that *some* eligible identity woke; ownership can change before this
     // turn starts, so never let a stale bridge membership mark another
     // session's messages read.
-    const eligibleArgs = [path.join(SCRIPT_DIR, "eligible-pairs.sh"), toPosixPath(this.opts.project), this.opts.type];
+    const eligibleArgs = [path.join(SCRIPT_DIR, "eligible-pairs.sh"), this.opts.scriptProject || toPosixPath(this.opts.project), this.opts.type];
     if (this.opts.ownerId) eligibleArgs.push("--owner", this.opts.ownerId);
     eligibleArgs.push(...this.identities.flatMap((pair) => ["--pair", `${pair.team}\t${pair.name}`]));
     const eligible = spawnSync(BASH_BIN, eligibleArgs, { cwd: this.opts.project, encoding: "utf8" });
@@ -1734,6 +1819,9 @@ class CodexBridge {
   async shutdown() {
     if (this.stopping) return;
     this.stopping = true;
+    this.monitorReady = false;
+    clearInterval(this.attachTimer);
+    if (this.controlServer) this.controlServer.close();
     this.clearWatchRearmTimer();
     this.clearTurnWatchdog();
     if (this.watchHandle) {
@@ -1851,6 +1939,9 @@ function parseWsTarget(url) {
 }
 
 function createAppServerClient(opts) {
+  if (opts.appServer === "daemon://") {
+    return new WebSocketAppServerClient({ proxy: true }, "daemon://", opts);
+  }
   if (opts.appServer && opts.appServer.startsWith("unix://")) {
     const rawSocketPath = opts.appServer.slice("unix://".length);
     if (!rawSocketPath) die("--app-server unix:// requires a socket path");
@@ -1922,6 +2013,25 @@ async function main() {
   }
 
   const identities = resolveIdentities(opts);
+  if (opts.stopAttached || opts.activateCurrent) {
+    const control = require("./monitor-control");
+    const pipe = control.address(SKILL_DIR, opts.project, identities);
+    if (opts.stopAttached) {
+      let status;
+      try { status = await control.query(pipe); } catch (error) {
+        if (error.code === "ENOENT" || error.code === "ECONNREFUSED") return;
+        throw error;
+      }
+      if (status.attached) await control.query(pipe, "stop");
+      return;
+    }
+    fs.mkdirSync(RUN_DIR, { recursive: true });
+    const args = process.argv.slice(2).map((arg) => arg === "--activate-current" ? "--attach-current" : arg);
+    const log = path.join(RUN_DIR, `codex-bridge.${identities[0].team}.${identities[0].name}.log`);
+    const status = await control.activate(pipe, __filename, args, log, { thread: opts.threadId, appServer: opts.appServer });
+    console.log(`Codex monitor receiving: ${identities[0].team}/${identities[0].name} thread=${status.thread} pid=${status.pid}`);
+    return;
+  }
   if (opts.resolveOnly) {
     console.log(identities.map((pair) => `${pair.team}\t${pair.name}`).join("\n"));
     return;
@@ -1939,4 +2049,5 @@ if (require.main === module) {
 // the property that matters — a diagnostic never continues someone else's
 // half-line — is a property of these two together, and driving them directly
 // is the only way to state it without standing up an app-server.
-module.exports = { toPosixPath, writeErr, logLine };
+// The client factory also lets integration tests use an isolated real server.
+module.exports = { toPosixPath, writeErr, logLine, createAppServerClient };

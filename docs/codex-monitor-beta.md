@@ -1,7 +1,57 @@
 # Codex Monitor
 
 Codex does not expose Claude Code's Monitor tool. agmsg's Codex monitor
-approximates the same experience by launching Codex through an app-server bridge.
+approximates the same experience through an app-server bridge. On Windows it
+can attach to an already running session; other platforms use the launch wrapper.
+
+## Windows: enable from the current Codex session
+
+Start Codex normally from the project directory in a non-administrator terminal,
+then enter:
+
+```text
+$agmsg actas <name>
+$agmsg mode monitor
+```
+
+The first command selects a registered Codex role for this thread. Use a different
+role for each simultaneous Codex session. Once selected, `mode monitor` is enough
+to start receiving; repeating it reuses the armed bridge for the same thread.
+The skill invokes `delivery.sh set monitor codex "$PWD"` outside the tool sandbox.
+That command configures hooks, starts the native dispatcher with this project
+allowed, and attaches the bridge to this thread's existing app-server. It does not
+launch another TUI, install a shell profile shim or register an OS startup task.
+Only `Codex monitor receiving: ...` confirms that the watcher is armed. Hook
+configuration can succeed even when runtime attachment fails; inspect the error
+and `run/codex-bridge.<team>.<name>.log` in that case. Run `$agmsg mode` for status.
+
+This path requires an existing reachable server: an agmsg seat endpoint or
+Codex 0.163's shared local app-server via `codex app-server proxy`. The exact
+`CODEX_THREAD_ID` must be loaded there, and its project and recorded role must
+match. It never chooses the first loaded thread or creates a replacement server.
+Administrator launches, `--no-daemon` and some custom CLI options use an embedded
+server that cannot be attached later. Such a session must be reopened using a
+normal shared-server launch or the existing agmsg launch wrapper below. The
+first user turn must have created a rollout before its project can be checked.
+See [Codex's launch policy](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/tui/src/daemon_startup.rs).
+
+The native pipe serializes monitor startup for each installation/project/role.
+Startup waits for `thread/resume` and watcher creation; errors remain errors.
+The attached bridge checks thread and role ownership every five seconds and
+again before reading an inbox. It exits on a failed check. `mode turn` and
+`mode off` stop attached monitors; these settings apply to all Codex roles in
+the project. They do not stop the shared Codex daemon. Existing launch-wrapper
+sessions retain their existing teardown behavior. The lifecycle dispatcher is
+installation-wide: use its explicit `-Action Stop` only when no project needs it.
+After a PC reboot, open Codex, select the role, and run `mode monitor` again.
+Other projects on an already running dispatcher's allowlist are not added
+automatically; restart it externally with all required `-Project` values.
+
+To roll back, run `mode off`, stop the lifecycle dispatcher, restore the backed-up
+installation and project hooks, then reopen Codex. No OS registration is removed
+because this feature creates none.
+
+## Launch wrapper (Linux/macOS and Windows fallback)
 
 > ⚠️ **This changes how Codex starts — read before enabling.**
 > Enabling monitor mode prints a shell function that makes `codex` route through

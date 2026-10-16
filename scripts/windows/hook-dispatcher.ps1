@@ -228,6 +228,23 @@ try {
         exit 0
     }
     if ($Action -eq 'Status' -or $Action -eq 'Start') {
+        if ($Action -eq 'Start') {
+            # Inspect the live owner's immutable lock metadata, never enlarge
+            # its allowlist from sandbox-writable requests or another Start.
+            $reader = $null
+            try {
+                $stream = [IO.File]::Open($LockFile, 'Open', 'Read', 'ReadWrite')
+                $reader = New-Object IO.StreamReader($stream, $Utf8)
+                $owner = $reader.ReadToEnd() | ConvertFrom-Json
+                if ($owner.version -ne 1) { throw 'Unsupported dispatcher metadata.' }
+                foreach ($directory in $Project) {
+                    $full = (Assert-LocalPath $directory).TrimEnd('\')
+                    if ($full -notin @($owner.projects)) { throw "Project is not allowed by the running dispatcher: $full" }
+                }
+            } catch {
+                throw "Cannot confirm the running dispatcher's allowlist. Stop it and restart outside Codex with all required -Project values. $($_.Exception.Message)"
+            } finally { if ($reader) { $reader.Dispose() } }
+        }
         Write-Output 'Dispatcher running (exclusive installation lock held).'
         Write-QueueStatus
         exit 0
@@ -276,7 +293,7 @@ try {
         Write-Output "Dispatcher started. Use -Action Status for queue counts. Log: $LogFile"
         exit 0
     }
-    $metadata = $Utf8.GetBytes("pid=$PID projects=$($Allowed.Count)")
+    $metadata = $Utf8.GetBytes((@{ version = 1; pid = $PID; projects = @($Allowed.Keys) } | ConvertTo-Json -Compress))
     $lock.SetLength(0)
     $lock.Write($metadata, 0, $metadata.Length)
     $lock.Flush()
