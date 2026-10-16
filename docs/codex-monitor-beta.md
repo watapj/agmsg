@@ -59,6 +59,133 @@ codex
 In monitor-mode projects, the function routes interactive Codex launches through
 the bridge. Outside monitor-mode projects, it passes through to the real Codex.
 
+## Windows: native lifecycle hook queue
+
+Codex's Windows sandbox can reject MSYS shared-memory creation with
+`CreateFileMapping ... Win32 error 5`. SessionStart and SessionEnd therefore
+use a native PowerShell `commandWindows` that writes a request to
+`run/hook-queue/`. A dispatcher started from a normal, unsandboxed terminal
+executes the installed Bash hook later. Linux/macOS use the existing `command`;
+Claude Code and Codex Stop/PostToolUse retain their existing synchronous hooks.
+Queue transport does not repair a sandbox's inability to run those synchronous
+hooks or other Bash tools.
+
+### Install or update
+
+Use a checkout containing this feature. In a normal Git Bash terminal, run
+`bash ./install.sh --cmd agmsg` for a new installation, or
+`bash ./install.sh --update --cmd agmsg` for an existing one. The installer
+preserves DB/team state, but can update skill/configuration files and add Codex
+writable roots; review and back up existing configuration before using it.
+An update downloaded from a different upstream revision may replace this feature.
+
+For an existing installation, stop its dispatcher before updating its scripts.
+Then regenerate this project's hooks in Git Bash (outside Codex):
+
+```bash
+~/.agents/skills/agmsg/scripts/delivery.sh set monitor codex "$PWD"
+```
+
+Check `.codex/hooks.json`: only SessionStart/SessionEnd `commandWindows` should
+invoke `hook-enqueue.ps1`; their POSIX `command` values still invoke the existing
+session hooks. Other applications' hook entries are preserved.
+
+### Start, inspect and stop
+
+In a **normal PowerShell terminal outside Codex**, set the installed script path
+and the exact project directory, then start the dispatcher:
+
+```powershell
+$dispatcher = "$env:USERPROFILE\.agents\skills\agmsg\scripts\windows\hook-dispatcher.ps1"
+& $dispatcher -Action Start -Project 'C:\work\my project'
+& $dispatcher -Action Status
+```
+
+Use `-Project @('C:\work\one', 'C:\work\two')` for several explicitly trusted
+projects. `-Bash 'C:\Program Files\Git\bin\bash.exe'` overrides Git Bash
+(`GIT_BASH`, then `AGMSG_BASH`, then that default path). `-Action Run` runs in
+the foreground; `-Once` drains the current queue once. Windows PowerShell 5.1
+and PowerShell 7 are supported. If local execution policy prevents running a
+script, invoke `powershell.exe -NoProfile -ExecutionPolicy Bypass -File` with
+the script path and arguments; this affects that process only.
+
+The dispatcher starts a hidden process for this login only. It does not register
+a scheduled task, modify ACLs, change execution policy persistently, or disable
+the Codex sandbox. Restart it after logout/reboot. Stop and restart to change
+the allowed project list; starting again while it is running keeps the original
+list. Run `-Action Status` to confirm startup; a launch message alone is not a
+readiness check.
+
+```powershell
+& $dispatcher -Action Stop
+& $dispatcher -Action Status
+```
+
+Stop is cooperative: the current hook completes or times out before shutdown
+(default hook deadline 60 seconds, configurable with `-HookTimeoutSeconds`,
+plus up to 5 seconds to terminate a timed-out process tree).
+The exclusive installation lock prevents concurrent dispatchers and releases
+automatically when the process exits. Stop never kills a PID read from a file.
+
+Finally use the Git Bash function from Quick Start, or run
+`~/.agents/skills/agmsg/scripts/drivers/types/codex/codex-monitor.sh` directly
+from a normal Git Bash terminal in the project. A plain PowerShell `codex`
+command does not acquire a Git Bash shell function. Restart Codex, send the
+first message, and register the intended team/agent for that session using the
+usual agmsg workflow. Inspect `delivery.sh status codex "$PWD"` for the existing
+bridge's status. A completed enqueue or hook is not proof of a live bridge or
+message delivery; verify an incoming message in the intended Codex thread.
+
+### Diagnostics, retries and rollback
+
+- `run/hook-dispatcher.log` records request IDs, hook exit codes and errors;
+  it resets after 1 MiB. The dispatcher does not log stdin or hook stdout;
+  hook stderr is retained and may contain context. Enqueue failures also print
+  to stderr and append to `%TEMP%\agmsg-hook-enqueue.err`; the hook still exits 0.
+- While the dispatcher is stopped, `.req` files stay pending. There is no
+  project-local fallback queue: allow writes to this installation's `run/`
+  using the existing Codex writable-root configuration. A blocked queue is a
+  diagnostic failure, not successful delivery.
+- `.done` means the fixed hook exited 0; `.failed` retains rejected/failed
+  input; `.processing` becomes `.uncertain` after an interrupted dispatcher.
+  Terminal files deduplicate the same request ID. None are automatically
+  retried: a hook can perform side effects before failing. After diagnosing a
+  failure and checking delivery did not already occur, stop the dispatcher and
+  rename the selected `.failed`/`.uncertain` file back to `.req` to retry it.
+  Retained requests include raw hook input; protect them as local session data.
+  Archive/remove terminal files only while stopped and after the deduplication
+  history is no longer needed; storage is not automatically pruned.
+- `delivery.sh set off codex "$PWD"` removes this install's delivery hooks and
+  stops its bridge through the existing cleanup path. A later queued event is
+  rejected if the corresponding monitor hook is absent. `turn` likewise removes
+  queue hooks; synchronous Stop/PostToolUse behavior is retained. Stop the
+  dispatcher separately when no project needs it.
+- To roll back, disable monitor, stop the dispatcher, reinstall the previous
+  known revision, and regenerate the desired delivery mode. Preserve DB/teams;
+  keep or archive pending/failed requests for diagnosis. The previous revision's
+  Windows hooks can encounter the original MSYS sandbox failure again.
+
+### Trust boundary
+
+Allow only projects you trust. The dispatcher accepts exactly Codex lifecycle
+events, validates absolute local paths, rejects junctions/symlinks, checks the
+current project hook configuration, and invokes a fixed installed replay script.
+It accepts no command, script path, endpoint or general environment map from a
+request. Session IDs and seat keys are bounded data; the seat's existing record
+must match the project's hash. The original stdin is replayed as UTF-8, without
+rollout guessing that could select a newer session after a queue delay. Existing
+seat/role/bridge association continues to decide which inbox reaches which thread.
+
+This is an explicit sandbox boundary crossing for these fixed hooks, running as
+the logged-in user. Keep installed **scripts** outside sandbox-writable roots;
+grant runtime writes only to the existing `db`, `teams`, and `run` directories.
+A writable source checkout is unsuitable as the trusted dispatcher installation.
+The queue and existing runtime records are writable by the session: validation
+is not authentication, and a writer can forge permitted events, suppress work,
+or fill the queue. Do not use this transport as isolation from malicious code
+with access to those runtime roots. No ACL or MSYS shared-memory relaxation is
+needed.
+
 ## Optional PATH Shim
 
 If you prefer the previous global PATH shim setup, install it explicitly:

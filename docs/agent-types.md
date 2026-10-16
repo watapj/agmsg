@@ -34,6 +34,7 @@ a manifest cannot execute code. Multi-value keys are whitespace-separated.
 | `delivery_modes` | — | space-separated delivery modes the type's CLI accepts (e.g. `monitor turn off`); `delivery.sh`'s gate rejects anything else. Defaults to `monitor turn both off` when omitted |
 | `stop_output` | — | output protocol for the Stop/turn inbox check — `json` (codex, copilot) vs. plain text (default) |
 | `hook_windows_wrap` | — | `yes` if JSON hook entries also need a Windows-native `commandWindows` variant (codex) |
+| `hook_windows_transport` | — | `queue` routes Windows SessionStart/SessionEnd through native PowerShell and an external dispatcher. Stop/PostToolUse retain `hook_windows_wrap` (codex). |
 
 > The reader does not fail-fast: an omitted key reads as the empty string, so
 > "required" above means "needed for the type to actually work", not "validated at
