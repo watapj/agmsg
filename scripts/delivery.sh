@@ -1078,11 +1078,12 @@ kill_all_watchers() {
               *"$needle"*) scope_ok=1 ;;
             esac
             if [ "$wait_for_exit" = wait ] && [ "$scope_ok" = 0 ]; then
-              local filter="$RUN_DIR/$(basename "${f%.pid}").filter" role filter_project filter_pid
+              local filter _role filter_project filter_pid
+              filter="${f%.pid}.filter"
               # Poke transitions also use atomic owner metadata to handle
               # native/MSYS path aliases and quoted paths with spaces.
               if [ -f "$filter" ]; then
-                { IFS= read -r role; IFS= read -r filter_project; IFS= read -r filter_pid; } < "$filter" || true
+                { IFS= read -r _role; IFS= read -r filter_project; IFS= read -r filter_pid; } < "$filter" || true
                 if [ "${filter_pid:-}" = "$pid" ] && \
                   [ "$(agmsg_poke_mode_path "$type" "${filter_project:-}")" = "$(agmsg_poke_mode_path "$type" "$project")" ]; then
                   case " $cmd " in *" $type "*|*" \"$type\" "*) scope_ok=1 ;; esac
