@@ -165,7 +165,7 @@ MSG_ID="$(storage_send "$TEAM" "$FROM" "$TO" "$BODY")"
 if [ "$POKE_MODE" = 1 ]; then
   POKE_BODY="$(mktemp)"
   printf '%s' "$BODY" > "$POKE_BODY"
-  if bash "$SCRIPT_DIR/poke.sh" "$TEAM" "$TO" --no-fallback --expect-project "$AGMSG_POKE_PROJECT" --body-file "$POKE_BODY"; then
+  if bash "$SCRIPT_DIR/poke.sh" "$TEAM" "$TO" --no-fallback --expect-project "$AGMSG_POKE_PROJECT" --from "$FROM" --body-file "$POKE_BODY"; then
     if ! storage_mark_read_batch "$TEAM" "$TO" "$MSG_ID" >/dev/null; then
       die "poke submitted message $MSG_ID, but its read receipt failed; check history/target before recovery; do not resend automatically"
     fi

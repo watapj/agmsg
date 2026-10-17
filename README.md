@@ -348,9 +348,12 @@ use different role names. Poke mode then uses ordinary startup, including the
 existing Codex shell wrapper, without creating monitor subscriptions.
 
 Send normally with `agmsg send <recipient> <message>`. The sender reads the
-recipient's project/type setting, saves the message, and submits its **body
-only** through the existing safe poke driver. No prefix, suffix, sender label,
-or inbox reminder is inserted. The successful submission marks only that
+recipient's project/type setting, saves the message, and submits **`[sender] `
+followed by the body** through the existing safe poke driver. Explicit pokes in
+any mode use `poke.sh <team> <recipient> --from <sender> --body-file <path>` for
+the same label. Keep the body unprefixed; no suffix or inbox reminder is added.
+Low-level `poke.sh` calls without `--from` retain unlabelled text for compatibility.
+The successful submission marks only that
 message read; history retains sender, recipient and full text. The input itself
 still appears in the recipient's session context. Submission confirms terminal
 acceptance, not model completion; require an acknowledgement where needed.

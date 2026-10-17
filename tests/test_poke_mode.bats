@@ -24,8 +24,9 @@ fake_poke() {
 #!/usr/bin/env bash
 set -eu
 [ "$1" = poketeam ] && [ "$2" = receiver ]
-[ "$3" = --no-fallback ] && [ "$4" = --expect-project ] && [ "$5" = "$PROJECT" ] && [ "$6" = --body-file ]
-cat "$7" > "$CAPTURE"
+[ "$3" = --no-fallback ] && [ "$4" = --expect-project ] && [ "$5" = "$PROJECT" ]
+[ "$6" = --from ] && [ "$7" = sender ] && [ "$8" = --body-file ]
+cat "$9" > "$CAPTURE"
 exit "${POKE_RESULT:-0}"
 SH
 }
@@ -78,8 +79,8 @@ assert_raw_send() {
     [ ! -f INJECTED ]
 }
 
-@test "poke mode: send raw body to Codex and mark only that message read" { assert_raw_send codex; }
-@test "poke mode: send raw body to Claude Code and mark only that message read" { assert_raw_send claude-code; }
+@test "poke mode: pass sender and original body to Codex and mark only that message read" { assert_raw_send codex; }
+@test "poke mode: pass sender and original body to Claude Code and mark only that message read" { assert_raw_send claude-code; }
 
 @test "poke mode: failed submission stays unread, returns failure, and is not retried" {
   configure_pair codex

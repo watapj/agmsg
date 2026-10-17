@@ -214,7 +214,7 @@ agmsg_role_session_record team alice "$TEST_THREAD" "$(cygpath -u "$TEST_PROJECT
 bash "$SKILL_DIR/scripts/delivery.sh" set poke codex "$(cygpath -u "$TEST_PROJECT")"
 '''], env=env, capture_output=True, encoding="utf-8", timeout=90)
         self.assertEqual(record.returncode, 0, record.stderr + record.stdout)
-        self.assertIn("raw body", record.stdout)
+        self.assertIn("[sender] followed by the body", record.stdout)
         self.assertFalse((self.skill / "run/codex-bridge.team.alice.pid").exists())
         self.assertTrue(any(p.read_text(encoding="utf-8").strip() == "ready"
                             for p in (self.skill / "run").glob("delivery-poke.codex.*")))

@@ -20,7 +20,7 @@ set -euo pipefail
 #   monitor  — SessionStart hook → Claude Code Monitor tool → watch.sh stream
 #   turn     — Stop hook → check-inbox.sh between turns (legacy)
 #   both     — monitor primary; turn as per-session safety net
-#   poke     — send submits raw bodies to the receiving pane, no polling
+#   poke     — send submits sender-labelled bodies to the receiving pane, no polling
 #   off      — no automatic delivery
 #
 # `status` reports configured delivery hooks. For Claude Code, `mode: monitor`
@@ -912,7 +912,7 @@ do_set() {
       poke_tmp="$(mktemp "$RUN_DIR/delivery-poke.XXXXXX")"
       printf 'ready\n' > "$poke_tmp"
       mv "$poke_tmp" "$poke_marker"
-      echo 'send now submits the raw body to this project/type through poke; no monitor or inbox polling.'
+      echo 'send now submits [sender] followed by the body to this project/type through poke; no monitor or inbox polling.'
       echo 'An addressable terminal pane is required. Failed submissions remain unread; do not automatically resend.'
       ;;
     monitor|both)

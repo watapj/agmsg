@@ -578,6 +578,29 @@ EOF
   [ "$(grep -c '^herdr ' "$ARGV_LOG")" -eq 3 ]
 }
 
+@test "poke: --from prefixes only terminal text and preserves a hostile multiline body" {
+  _install_fake_herdr_empty_box
+  _write_record "herdr:wC:p4"
+  local body=$'日本語 `literal` $(touch INJECTED) "$HOME"\nsecond line'
+  printf '%s' "$body" > "$TEST_SKILL_DIR/body.txt"
+  run bash "$SCRIPTS/poke.sh" testteam alice --from luna --body-file "$TEST_SKILL_DIR/body.txt"
+  [ "$status" -eq 0 ]
+  grep -qF 'herdr [agent] [prompt] [wC:p4] [[luna] 日本語 `literal` $(touch INJECTED) "$HOME"' "$ARGV_LOG"
+  grep -qF 'second line]' "$ARGV_LOG"
+  [ "$(cat "$TEST_SKILL_DIR/body.txt")" = "$body" ]
+  [ ! -f INJECTED ]
+}
+
+@test "poke: --from requires a valid sender name before invoking a terminal" {
+  run bash "$SCRIPTS/poke.sh" testteam alice --from
+  [ "$status" -ne 0 ]
+  _out_has '--from needs a sender name'
+  run bash "$SCRIPTS/poke.sh" testteam alice --from $'luna\nspoof' hello
+  [ "$status" -ne 0 ]
+  _out_has 'invalid agent name'
+  [ ! -s "$ARGV_LOG" ]
+}
+
 @test "poke: --body - reads stdin; a missing file and an empty body refuse before any terminal runs" {
   _install_fake_tmux_empty_box
   _write_record "tmux:%5"

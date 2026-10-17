@@ -8,6 +8,7 @@ set -euo pipefail
 #   poke.sh <team> <name> --body -             # body read from stdin
 #   poke.sh <team> <name> <text>               # body as ONE quoted argument
 #   --no-fallback refuses unsupported panes without saving another message
+#   --from <sender> prefixes terminal text with [sender] (body storage unchanged)
 #
 # --body-file is the form the type templates teach, and the reason is #507's
 # lesson: a positional <text> passes through the CALLER's shell first, where a
@@ -58,12 +59,14 @@ source "$SCRIPT_DIR/lib/detect-cli-type.sh"     # agmsg_detect_cli_type (#1229 p
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/safe-poke.sh"           # agmsg_safe_poke -- also sources input-box.sh
 # shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/validate.sh"
+# shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/resolve-project.sh"     # agmsg_registered_type (#1391)
 
 die() { echo "poke: $*" >&2; exit 1; }
 
 TEAM="${1:-}"; NAME="${2:-}"
-USAGE="Usage: poke.sh <team> <name> [--retries N] [--retry-delay SECONDS] [--backoff fixed|exponential] --body-file <path> | --body - | <text>"
+USAGE="Usage: poke.sh <team> <name> [--from <sender>] [--retries N] [--retry-delay SECONDS] [--backoff fixed|exponential] --body-file <path> | --body - | <text>"
 [ -n "$TEAM" ] && [ -n "$NAME" ] || die "$USAGE"
 shift 2
 
@@ -80,9 +83,14 @@ RETRY_DELAY=2
 BACKOFF=exponential
 NO_FALLBACK=0
 EXPECT_PROJECT=""
+FROM=""
 _REMAINING=()
 while [ $# -gt 0 ]; do
   case "$1" in
+    --from)
+      [ $# -ge 2 ] && [ -n "$2" ] || die "--from needs a sender name"
+      agmsg_validate_agent_name "$2" || exit 1
+      FROM="$2"; shift 2 ;;
     --no-fallback) NO_FALLBACK=1; shift ;;
     --expect-project)
       [ $# -ge 2 ] && [ -n "$2" ] || die "--expect-project needs a project path"
@@ -194,7 +202,9 @@ INPUT_BOXED="$(agmsg_type_get "$TYPE" input_prompt_boxed)"
 [ "$TERMINAL" = plain ] && INPUT_MARKER=""
 
 RC=0
-agmsg_safe_poke "$BARE_ID" "$TEXT" "$INPUT_MARKER" "$INPUT_BOXED" "$TEAM" "$NAME" \
+POKE_TEXT="$TEXT"
+[ -z "$FROM" ] || POKE_TEXT="[$FROM] $TEXT"
+agmsg_safe_poke "$BARE_ID" "$POKE_TEXT" "$INPUT_MARKER" "$INPUT_BOXED" "$TEAM" "$NAME" \
   --retries "$RETRIES" --retry-delay "$RETRY_DELAY" --backoff "$BACKOFF" || RC=$?
 
 if [ "$RC" -eq 14 ]; then

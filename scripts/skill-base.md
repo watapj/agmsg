@@ -81,7 +81,7 @@ Four possible outputs:
 
 ## Execute
 
-**Poke delivery.** In `mode poke`, ordinary `send` automatically submits only the message body to the receiving pane. Do not add a sender prefix, notification wrapper, suffix, or inbox instruction. Do not follow a successful send with a second manual poke. Finish the turn when only waiting for a reply; do not start Monitor or poll inbox/peek/team. Explicit user inbox requests still work. A failed send may have saved an unread message or partially submitted it: inspect the reported ID and target once before recovery, never resend automatically. A submission receipt confirms terminal acceptance, not model completion; retain any required acknowledgement.
+**Poke delivery.** In `mode poke`, ordinary `send` automatically submits `[sender] ` followed by the message body to the receiving pane. The script adds the active sender's name; keep the body unprefixed and do not add a notification wrapper, suffix, or inbox instruction. Explicit `poke` uses `--from "$AGENT"` to add the same label in any delivery mode. Do not follow a successful send with a second manual poke. Finish the turn when only waiting for a reply; do not start Monitor or poll inbox/peek/team. Explicit user inbox requests still work. A failed send may have saved an unread message or partially submitted it: inspect the reported ID and target once before recovery, never resend automatically. A submission receipt confirms terminal acceptance, not model completion; retain any required acknowledgement.
 
 **Monitor delivery and waiting.** A monitor event containing message text has already delivered that message and advanced its read state. Use the supplied text directly; do not call `inbox` again merely because that event arrived. An explicit user request to check the inbox still runs normally. When a notification is truncated, use its `[id=...]` with `history.sh <team> <recipient> --id <id>` to read that one message without changing read state; do not search recent history repeatedly or retry an empty inbox for an already delivered message. Older notifications without an ID can be recovered from history once.
 
@@ -190,7 +190,8 @@ If argument starts with "poke" (e.g. "poke reviewer status?"):
 1. Parse `<name>` and the remaining text as the message.
 2. Determine which team `<name>` belongs to (as with `send`). Write the text to
    a file with whatever file-writing tool this agent has, then run:
-   `~/.agents/skills/__SKILL_NAME__/scripts/poke.sh <team> <name> --body-file <path>`
+   `~/.agents/skills/__SKILL_NAME__/scripts/poke.sh <team> <name> --from "$AGENT" --body-file <path>`
+   Use this session's active FROM role as `$AGENT`; never use the recipient's name. The script adds `[sender] ` to the terminal text, so leave the body file unprefixed. Low-level callers without `--from` retain their existing unlabelled text.
    Do NOT interpolate the text into the command line. A body passed as a shell
    argument crosses THIS agent's shell first, where a backtick or `$( )` inside
    it is executed and its span vanishes from what arrives — with no error and a
