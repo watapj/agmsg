@@ -258,6 +258,20 @@ bash "$SKILL_DIR/scripts/drivers/types/codex/codex-monitor-activate.sh" --check 
         self.assertIn("disabled while poke mode is selected", result.stderr)
         self.assertFalse(self.requests())
 
+    def test_transient_role_check_pauses_and_can_stop_without_a_ready_flag(self):
+        self.run_bridge("--activate-current")
+        (self.driver / "codex-monitor-activate.sh").write_text("exit 75\n", encoding="utf-8")
+        deadline = time.monotonic() + 30
+        while "role verification unavailable" not in self.bridge_log() and time.monotonic() < deadline:
+            time.sleep(.1)
+        self.assertIn("role verification unavailable", self.bridge_log())
+        self.assertTrue((self.skill / "run/codex-bridge.team.alice.pid").exists())
+        result = subprocess.run(["node", str(self.driver / "monitor-control.js"), "stop",
+                                 str(self.project), "team", "alice", self.thread], env=self.env,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.skill / "run/codex-bridge.team.alice.pid").exists())
+
     def test_claude_poke_transition_waits_for_native_path_watcher_to_exit(self):
         settings = self.project / ".claude/settings.local.json"
         settings.parent.mkdir()
@@ -312,8 +326,8 @@ bash "$skill/scripts/delivery.sh" set "$1" claude-code "$(cygpath -u "$TEST_PROJ
 
     def test_role_reassignment_stops_the_attached_monitor(self):
         self.run_bridge("--activate-current")
-        (self.driver / "codex-monitor-activate.sh").write_text("exit 1\n", encoding="utf-8")
-        for _ in range(140):
+        (self.driver / "codex-monitor-activate.sh").write_text("exit 3\n", encoding="utf-8")
+        for _ in range(500):
             if not (self.skill / "run/codex-bridge.team.alice.pid").exists():
                 break
             time.sleep(.05)
@@ -352,7 +366,7 @@ bash "$skill/scripts/delivery.sh" set "$1" claude-code "$(cygpath -u "$TEST_PROJ
 
     def test_activated_bridge_delivers_to_exact_current_thread(self):
         (self.driver / "eligible-pairs.sh").write_text("printf 'team\\talice\\n'\n", encoding="utf-8")
-        (self.skill / "scripts/inbox.sh").write_text("printf 'isolated fixture message\\n'\n", encoding="utf-8")
+        (self.skill / "scripts/inbox.sh").write_text('case "$3" in --snapshot) printf \'%s\\n\' \'{"team":"team","to":"alice","from":"bob","id":"m1","at":"now","body":"isolated fixture message"}\';; esac\n', encoding="utf-8")
         env = dict(self.env, TEST_WAKE="1")
         self.run_bridge("--activate-current", "--inline-inbox", "--max-wakes", "1", env=env)
         for _ in range(100):

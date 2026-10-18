@@ -7,6 +7,9 @@
 load test_helper
 
 setup() {
+  if [[ "${BATS_TEST_DESCRIPTION:-}" == *'--max-seconds renews'* ]]; then
+    skip_on_windows "8-second live deadline can expire during MSYS startup; native renewal decisions are covered by test_watch_renewal.py"
+  fi
   setup_test_env
   # On MSYS2, the compat shim makes the ppid walk succeed; _iid() (bats
   # subshell) and watch.sh (standalone bash) have different process trees, so
@@ -16,6 +19,15 @@ setup() {
   export PROJ="/tmp/agmsg-watch-proj"
   bash "$SCRIPTS/join.sh" team alice claude-code "$PROJ" >/dev/null
   bash "$SCRIPTS/join.sh" team bob claude-code "$PROJ" >/dev/null
+}
+
+@test "watch: read receipt failure stops after one delivery with message IDs" {
+  bash "$SCRIPTS/send.sh" team bob alice 'receipt probe' >/dev/null
+  printf '\nstorage_read_cursor_consume() { return 77; }\n' >> "$SCRIPTS/drivers/storage/sqlite.sh"
+  run bash "$SCRIPTS/watch.sh" s-receipt "$PROJ" claude-code alice --max-seconds=90
+  [ "$status" -eq 75 ]
+  [[ "$output" == *'delivery receipt failed for team/alice ids='* ]]
+  [ "$(printf '%s\n' "$output" | grep -c 'receipt probe')" -eq 1 ]
 }
 
 # #1262/#1318: record <pid> (a process this test just backgrounded with `&`)
@@ -364,7 +376,8 @@ _wait_exit() {  # <pid> <tenths>
   return 1
 }
 
-@test "watch: --max-seconds ends the run with a re-arm line after a delivery, a stopping line when quiet, and never without the flag" {
+@test "watch: --max-seconds renews idle by default and stops idle only with explicit opt-out" {
+  skip_on_windows "8-second live deadline can expire during MSYS startup; see test_watch_renewal.py"
   local out="$BATS_TEST_TMPDIR/ms.out" pid
   # One role per run: a watcher that names a role claims its actas lock.
   bash "$SCRIPTS/join.sh" team carol claude-code "$PROJ" >/dev/null
@@ -383,7 +396,7 @@ _wait_exit() {  # <pid> <tenths>
   grep -qF -- 'alice --max-seconds=8' "$out"
 
   # Quiet run: nothing delivered -> stopping, not re-arm.
-  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" s-ms2 "$PROJ" claude-code carol --max-seconds=2 >"$out" 2>/dev/null 3>&- 4>&- &
+  AGMSG_CC_MONITOR_KEEP_ALIVE=off AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" s-ms2 "$PROJ" claude-code carol --max-seconds=2 >"$out" 2>/dev/null 3>&- 4>&- &
   pid=$!
   _bg_track "$pid"
   _wait_exit "$pid" 150 || { _stop_watcher "$pid"; false; }
@@ -392,7 +405,7 @@ _wait_exit() {  # <pid> <tenths>
   refute grep -qF 'agmsg watch: re-arm' "$out"
 
   # Quiet but kept alive by the environment -> re-arm anyway.
-  AGMSG_CC_MONITOR_KEEP_ALIVE=1 AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" s-ms3 "$PROJ" claude-code dave --max-seconds=2 >"$out" 2>/dev/null 3>&- 4>&- &
+  AGMSG_WATCH_INTERVAL=1 bash "$SCRIPTS/watch.sh" s-ms3 "$PROJ" claude-code dave --max-seconds=2 >"$out" 2>/dev/null 3>&- 4>&- &
   pid=$!
   _bg_track "$pid"
   _wait_exit "$pid" 150 || { _stop_watcher "$pid"; false; }

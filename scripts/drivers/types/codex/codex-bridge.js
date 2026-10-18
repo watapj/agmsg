@@ -1040,6 +1040,7 @@ class CodexBridge {
       : crypto.createHash("sha1").update(identities.map((p) => `${p.team}\t${p.name}`).join("\n")).digest("hex");
     this.pidfile = path.join(RUN_DIR, `codex-bridge.${key}.pid`);
     this.metafile = path.join(RUN_DIR, `codex-bridge.${key}.meta`);
+    this.deliveryFile = path.join(RUN_DIR, `codex-bridge.${key}.delivery.json`);
     // A per-PID identity lease the launcher reaper reads to tell an orphan of THIS
     // (project, role) from any other bridge, without reconstructing argv from ps
     // (#943). Keyed by pid so duplicates are each enumerable; content is hashes,
@@ -1100,7 +1101,7 @@ class CodexBridge {
       this.startTurnWatchdog();
     }));
     this.client.on("turn/completed", this.clientHandler("turn/completed", (params) => this.onTurnCompleted(params)));
-    this.client.on("turn/failed", this.clientHandler("turn/failed", () => this.onTurnCompleted()));
+    this.client.on("turn/failed", this.clientHandler("turn/failed", (params) => this.onTurnCompleted(params)));
 
     // A headless bridge must never leave a prompt only a human can answer
     // unanswered -- an unanswered approval/elicitation request wedges the
@@ -1119,25 +1120,38 @@ class CodexBridge {
     await this.client.ready?.();
     await this.initialize();
     await this.ensureThread();
+    await this.resumeDelivery();
     await this.armWatch();
     // After armWatch, not before: the seat is a claim that this role is being
     // delivered to, and until the watch is armed that is not yet true.
     if (!this.opts.attachCurrent) this.recordSeat();
     this.monitorReady = true;
+    this.monitorInitialized = true;
     if (process.connected) process.send({ ready: true, thread: this.threadId, appServer: this.opts.appServer, pid: process.pid });
     if (this.opts.attachCurrent) {
       this.attachTimer = setInterval(() => {
         if (this.attachCheckPending || this.stopping) return;
         this.attachCheckPending = true;
-        this.checkCurrentThread().catch((error) => {
-          if (!this.stopping) this.failClientHandler("current-session check", error);
+        this.checkCurrentThread().then(() => {
+          if (this.pendingWake) return this.tryStartTurn();
+        }).catch((error) => {
+          if (this.stopping) return;
+          if (!error.roleCheckUnavailable) { this.failClientHandler("current-session check", error); return; }
+          this.monitorReady = false;
+          console.error(`codex-bridge: role verification unavailable; delivery paused: ${error.message}`);
         })
           .finally(() => { this.attachCheckPending = false; });
-      }, 5000);
+      }, 15000);
     }
   }
 
   async checkCurrentThread() {
+    if (this.currentCheck) return this.currentCheck;
+    this.currentCheck = this.verifyCurrentThread();
+    try { return await this.currentCheck; } finally { this.currentCheck = null; }
+  }
+
+  async verifyCurrentThread() {
     const loaded = await this.client.request("thread/loaded/list", {});
     if (!Array.isArray(loaded.data) || !loaded.data.includes(this.threadId)) {
       throw new Error("current thread is not loaded on this server; embedded/--no-daemon sessions cannot attach");
@@ -1153,20 +1167,29 @@ class CodexBridge {
         cwd: SKILL_DIR, windowsHide: true, timeout: 30000, stdio: ["ignore", "pipe", "pipe"],
       });
       this.attachCheckChild = child;
-      let stdout = "";
+      let stdout = "", stderr = "";
       child.stdout.setEncoding("utf8");
       child.stdout.on("data", (chunk) => { stdout += chunk; });
-      child.stderr.resume();
-      child.on("error", reject);
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (chunk) => { stderr = (stderr + chunk).slice(-2048); });
+      child.on("error", (cause) => { const error = new Error(cause.message); error.roleCheckUnavailable = true; reject(error); });
+      child.on("exit", (_code, signal) => {
+        if (signal) { child.stdout.destroy(); child.stderr.destroy(); }
+      });
       child.on("close", (status) => {
         if (this.attachCheckChild === child) this.attachCheckChild = null;
-        resolve({ status, stdout });
+        resolve({ status, stdout, stderr });
       });
     });
     if (this.stopping) return;
     if (role.status !== 0 || role.stdout.trim() !== `${this.identity.team}\t${this.identity.name}`) {
-      throw new Error("current thread no longer owns this role; run agmsg actas first");
+      const lost = role.status === 3 || role.status === 0;
+      const error = new Error(lost ? "current thread no longer owns this role; run agmsg actas first" :
+        `role helper failed (${role.status}): ${role.stderr.trim()}`);
+      error.roleCheckUnavailable = !lost;
+      throw error;
     }
+    if (this.monitorInitialized) this.monitorReady = true;
   }
 
   // Write the seat from the thread the bridge actually armed on (#579). Seating
@@ -1660,15 +1683,29 @@ class CodexBridge {
   }
 
   async tryStartTurn() {
+    if (this.deliveryInFlight || this.stopping) return;
+    this.deliveryInFlight = true;
+    try { await this.startDeliveryTurn(); } finally { this.deliveryInFlight = false; }
+  }
+
+  async startDeliveryTurn() {
     if (!this.pendingWake || this.turnActive || !this.threadIdle) return;
     if (this.opts.attachCurrent) {
       if (this.attachTurnCheck) return;
       this.attachTurnCheck = true;
-      try { await this.checkCurrentThread(); } finally { this.attachTurnCheck = false; }
+      try { await this.checkCurrentThread(); } catch (error) {
+        if (!error.roleCheckUnavailable) throw error;
+        this.monitorReady = false;
+        console.error(`codex-bridge: delivery paused until role verification recovers: ${error.message}`);
+        return;
+      } finally { this.attachTurnCheck = false; }
       if (this.stopping || !this.pendingWake || this.turnActive || !this.threadIdle) return;
     }
     if (this.opts.inlineInbox) {
-      this.inlineInboxText = this.readInboxForPrompt();
+      this.inlineInboxText = await this.readInboxForPrompt();
+      // A TUI turn can start while the asynchronous snapshot is being read.
+      // Keep the wake unread and defer it until that turn finishes.
+      if (this.stopping || this.turnActive || !this.threadIdle) return;
       if (!this.inlineInboxText.trim()) {
         console.error("codex-bridge: pending wake had no inbox output; re-arming");
         this.pendingWake = false;
@@ -1683,19 +1720,23 @@ class CodexBridge {
     // the claim left set across the await, a turn-end signal arriving mid-
     // request re-entered this method with the same wake and started a second
     // turn. The claim is restored on failure so the wake fires again (the
-    // inline inbox rows are already marked read by then, so the retry
-    // re-delivers the wake, not the payload — unchanged from before).
+    // inbox rows remain unread until the runtime accepts the payload).
     this.pendingWake = false;
     this.startInFlight = true;
     this.inFlightTurnId = null;
     this.inFlightTurnEnded = false;
     try {
+      if (this.opts.inlineInbox) this.writeDelivery("submitting");
       await this.client.request("turn/start", {
         threadId: this.threadId,
         input: [{ type: "text", text: prompt, text_elements: [] }],
         cwd: this.opts.project,
         runtimeWorkspaceRoots: this.opts.workspaceRoots,
       });
+      if (this.opts.inlineInbox) {
+        this.writeDelivery("accepted");
+        await this.ackDelivery();
+      }
       console.error(`codex-bridge: started turn on thread ${this.threadId}`);
       // Bound how long we treat the turn as active. The real app-server may
       // never send turn/completed; the watchdog (and thread/status idle) drive
@@ -1706,6 +1747,7 @@ class CodexBridge {
       this.turnActive = false;
       this.threadIdle = true;
       this.clearTurnWatchdog();
+      if (this.opts.inlineInbox) console.error(`codex-bridge: delivery stopped; inspect ${this.deliveryFile} before recovery; do not resend automatically`);
       throw error;
     } finally {
       this.startInFlight = false;
@@ -1797,7 +1839,7 @@ class CodexBridge {
         "",
         this.inlineInboxText.trim(),
         "",
-        "These messages were already read by the bridge. Use the text above; do not check the inbox again for them.",
+        "These messages are being acknowledged by the bridge. Use the text above; do not check the inbox again for them. Do not repeat work for an already processed message ID.",
         "When only waiting for another agent, finish this turn and let monitor delivery wake this thread.",
         "",
         "Continue the conversation in this Codex thread. If a reply to an agmsg sender is needed, send it with:",
@@ -1812,31 +1854,99 @@ class CodexBridge {
     ].join("\n");
   }
 
-  readInboxForPrompt() {
-    // Re-resolve locks immediately before reading. watch-once only tells us
-    // that *some* eligible identity woke; ownership can change before this
-    // turn starts, so never let a stale bridge membership mark another
-    // session's messages read.
-    const eligibleArgs = [path.join(SCRIPT_DIR, "eligible-pairs.sh"), this.opts.scriptProject || toPosixPath(this.opts.project), this.opts.type];
-    if (this.opts.ownerId) eligibleArgs.push("--owner", this.opts.ownerId);
-    eligibleArgs.push(...this.identities.flatMap((pair) => ["--pair", `${pair.team}\t${pair.name}`]));
-    const eligible = spawnSync(BASH_BIN, eligibleArgs, { cwd: this.opts.project, encoding: "utf8", windowsHide: true });
-    if (eligible.error || eligible.status !== 0) {
-      console.error("codex-bridge: could not resolve eligible identities before reading inbox");
-      return "";
-    }
-    const allowed = new Set((eligible.stdout || "").split(/\r?\n/).filter(Boolean));
+  async runInboxHelper(args) {
+    return new Promise((resolve, reject) => {
+      const child = spawn(BASH_BIN, args, {
+        cwd: this.opts.project, windowsHide: true, timeout: 30000,
+        env: { ...process.env, AGMSG_SELF_NAME: "off", AGMSG_SELF_RENAME: "off" },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      this.inboxChild = child;
+      let stdout = "", stderr = "", overflow = false;
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", (chunk) => {
+        stdout += chunk;
+        if (Buffer.byteLength(stdout) > 8 * 1024 * 1024) { overflow = true; child.kill(); }
+      });
+      child.stderr.on("data", (chunk) => { stderr = (stderr + chunk).slice(-4096); });
+      child.on("error", reject);
+      child.on("exit", (_code, signal) => {
+        if (signal) { child.stdout.destroy(); child.stderr.destroy(); }
+      });
+      child.on("close", (code, signal) => {
+        if (this.inboxChild === child) this.inboxChild = null;
+        if (code !== 0 || signal || overflow) reject(new Error(`inbox helper failed (${overflow ? "output limit" : signal || code}): ${stderr.trim()}`));
+        else resolve(stdout);
+      });
+    });
+  }
+
+  async eligibleInboxPairs() {
+    const args = [path.join(SCRIPT_DIR, "eligible-pairs.sh"), this.opts.scriptProject || toPosixPath(this.opts.project), this.opts.type];
+    if (this.opts.ownerId) args.push("--owner", this.opts.ownerId);
+    args.push(...this.identities.flatMap((p) => ["--pair", `${p.team}\t${p.name}`]));
+    return new Set((await this.runInboxHelper(args)).split(/\r?\n/).filter(Boolean));
+  }
+
+  async readInboxForPrompt() {
+    const allowed = await this.eligibleInboxPairs();
+    this.inboxBatch = [];
     const sections = [];
     for (const pair of this.identities) {
       if (!allowed.has(`${pair.team}\t${pair.name}`)) continue;
-      // --quiet: an empty inbox must read back as EMPTY. The human-facing
-      // "No new messages." line is non-blank, passed tryStartTurn's emptiness
-      // check, and became the entire prompt of an injected turn.
-      const result = spawnSync(BASH_BIN, [path.join(SCRIPTS_DIR, "inbox.sh"), pair.team, pair.name, "--quiet"], { cwd: this.opts.project, encoding: "utf8", windowsHide: true });
-      if (result.error || result.status !== 0) { console.error(`codex-bridge: inbox.sh failed for ${pair.team}/${pair.name}`); continue; }
-      if ((result.stdout || "").trim()) sections.push(result.stdout.trim());
+      const output = await this.runInboxHelper([path.join(SCRIPTS_DIR, "inbox.sh"), pair.team, pair.name, "--snapshot"]);
+      const messages = output.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+      for (const m of messages) {
+        if (m.team !== pair.team || m.to !== pair.name || !m.id || typeof m.body !== "string") throw new Error("invalid inbox snapshot");
+        sections.push(`[id=${m.id}] [${m.at}] ${m.from} → ${pair.name}: ${m.body}`);
+      }
+      if (messages.length) this.inboxBatch.push({ ...pair, ids: messages.map((m) => String(m.id)) });
+    }
+    if (this.inboxBatch.length) {
+      const current = await this.eligibleInboxPairs();
+      if (this.inboxBatch.some((p) => !current.has(`${p.team}\t${p.name}`))) {
+        throw new Error("role ownership changed during inbox snapshot; no turn submitted");
+      }
     }
     return sections.join("\n\n");
+  }
+
+  writeDelivery(phase) {
+    if (phase === "submitting" && fs.existsSync(this.deliveryFile)) {
+      throw new Error(`unresolved delivery receipt: ${this.deliveryFile}`);
+    }
+    const receipt = { version: 1, phase, thread: this.threadId, project: this.opts.project,
+      identities: this.identities, batches: this.inboxBatch };
+    const tmp = `${this.deliveryFile}.${process.pid}.tmp`;
+    try {
+      fs.writeFileSync(tmp, JSON.stringify(receipt), { flag: "wx", mode: 0o600 });
+      fs.renameSync(tmp, this.deliveryFile);
+    } finally { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); }
+  }
+
+  async resumeDelivery() {
+    if (!fs.existsSync(this.deliveryFile)) return;
+    const receipt = JSON.parse(fs.readFileSync(this.deliveryFile, "utf8"));
+    if (receipt.version !== 1 || receipt.thread !== this.threadId || receipt.project !== this.opts.project ||
+        JSON.stringify(receipt.identities) !== JSON.stringify(this.identities) || !Array.isArray(receipt.batches)) {
+      throw new Error(`delivery receipt identity mismatch: ${this.deliveryFile}`);
+    }
+    if (receipt.phase !== "accepted") throw new Error(`delivery outcome unknown: ${this.deliveryFile}; inspect the thread, then use monitor-control.js delivery-accept or delivery-retry`);
+    this.inboxBatch = receipt.batches;
+    await this.ackDelivery();
+  }
+
+  async ackDelivery() {
+    const allowed = await this.eligibleInboxPairs();
+    for (const pair of this.inboxBatch) {
+      if (!allowed.has(`${pair.team}\t${pair.name}`)) throw new Error("delivery accepted, but role ownership changed before acknowledgement");
+      for (let i = 0; i < pair.ids.length; i += 64) {
+        await this.runInboxHelper([path.join(SCRIPTS_DIR, "inbox.sh"), pair.team, pair.name, "--ack", ...pair.ids.slice(i, i + 64)]);
+      }
+    }
+    fs.unlinkSync(this.deliveryFile);
+    this.inboxBatch = [];
   }
 
   async shutdown() {
@@ -1845,6 +1955,7 @@ class CodexBridge {
     this.monitorReady = false;
     clearInterval(this.attachTimer);
     if (this.attachCheckChild) this.attachCheckChild.kill();
+    if (this.inboxChild) this.inboxChild.kill();
     if (this.controlServer) this.controlServer.close();
     this.clearWatchRearmTimer();
     this.clearTurnWatchdog();
@@ -2073,5 +2184,5 @@ if (require.main === module) {
 // the property that matters — a diagnostic never continues someone else's
 // half-line — is a property of these two together, and driving them directly
 // is the only way to state it without standing up an app-server.
-// The client factory also lets integration tests use an isolated real server.
-module.exports = { toPosixPath, writeErr, logLine, createAppServerClient };
+// The bridge class lets receipt tests exercise the production state machine.
+module.exports = { toPosixPath, writeErr, logLine, createAppServerClient, CodexBridge };

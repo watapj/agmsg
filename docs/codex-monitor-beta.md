@@ -37,7 +37,7 @@ See [Codex's launch policy](https://github.com/openai/codex/blob/rust-v0.163.0/c
 
 The native pipe serializes monitor startup for each installation/project/role.
 Startup waits for `thread/resume` and watcher creation; errors remain errors.
-The attached bridge checks thread and role ownership every five seconds and
+The attached bridge checks thread and role ownership every 15 seconds and
 again before reading an inbox. It exits on a failed check. `mode turn` and
 `mode off` stop attached monitors; these settings apply to all Codex roles in
 the project. They do not stop the shared Codex daemon. Existing launch-wrapper
@@ -61,6 +61,43 @@ Codex session also clears that project's Codex poke selection.
 To roll back, run `mode off`, stop the lifecycle dispatcher, restore the backed-up
 installation and project hooks, then reopen Codex. No OS registration is removed
 because this feature creates none.
+
+### Delivery receipts and recovery
+
+Inline delivery takes an unread snapshot, submits it to `turn/start`, and
+acknowledges only those message IDs after runtime acceptance. Inbox and role
+checks run asynchronously, with hidden child processes and 30-second helper
+timeouts. A temporary role-helper failure pauses receiving until verification
+recovers; it is not reported as a proven ownership loss.
+
+The bridge persists ID-only receipts at
+`run/codex-bridge.<team>.<name>.delivery.json`. An `accepted` receipt is
+acknowledged on restart without submitting another turn. A `submitting` receipt
+means acceptance is unknown (for example, the connection closed before the
+reply). Startup stops rather than guessing or replaying it. Inspect the exact
+message IDs with `history.sh <team> <name> --id <id>` and inspect the recipient
+thread. Do not consume its whole inbox to diagnose one message.
+
+After stopping the subscription, explicitly choose one decision from a normal
+PowerShell terminal, substituting the actual role and recorded thread ID:
+
+```powershell
+$control = "$env:USERPROFILE\.agents\skills\agmsg\scripts\drivers\types\codex\monitor-control.js"
+node $control delivery-accept 'C:\path\to\project' team name thread-id
+# OR, only after confirming the turn was never accepted:
+node $control delivery-retry 'C:\path\to\project' team name thread-id
+```
+
+Both commands require the receipt's exact project, role and thread and refuse
+to run while a monitor owns the control pipe. `delivery-accept` schedules only
+read acknowledgement; `delivery-retry` permits an unread message to be delivered
+on the next activation. Then run `$agmsg mode monitor` in the owning session.
+An already accepted receipt cannot be selected for retry.
+
+For an update, stop and re-enable an existing bridge to load the new code.
+Before rolling back, resolve pending receipts and stop the monitor; older
+versions do not understand these receipt files. Restore the prior scripts and
+rendered skill from the installation backup, then select the desired mode.
 
 ## Launch wrapper (Linux/macOS and Windows fallback)
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: inbox.sh <team> <agent_id> [--quiet]
+# Usage: inbox.sh <team> <agent_id> [--quiet|--snapshot|--ack ID...]
 # Shows unread messages and marks them as read.
 # --quiet: only output if there are unread messages (for hooks)
 
@@ -16,15 +16,34 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
 agmsg_storage_load
 
-# A seat that reads its inbox names its own pane if it is not named
-# (self-name.sh); see send.sh. Best-effort, never fails the read.
-# shellcheck disable=SC1091
-source "$SCRIPT_DIR/lib/self-name.sh"
-agmsg_self_name_on_action "$TEAM" "$AGENT"
-# Fix its own CLI session name once, early (self-rename.sh, #1081). Best-effort.
-# shellcheck disable=SC1091
-source "$SCRIPT_DIR/lib/self-rename.sh"
-agmsg_self_rename_on_action "$TEAM" "$AGENT"
+# Bridge transport: snapshot without consuming, then acknowledge only the IDs
+# accepted by the runtime. Background reads must not rename another seat.
+if [ "${3:-}" = --ack ]; then
+  shift 3
+  [ "$#" -gt 0 ] || { echo 'inbox: --ack requires message IDs' >&2; exit 2; }
+  storage_mark_read_batch "$TEAM" "$AGENT" "$@"
+  exit $?
+fi
+if [ "${3:-}" = --snapshot ]; then
+  storage_store_exists "$TEAM" || exit 0
+  storage_list_unread "$TEAM" "$AGENT"
+  exit $?
+fi
+
+# On Windows, transport must not wait for best-effort terminal discovery or
+# implicitly type /rename. Join/actas/fix own placement; explicit opt-in keeps
+# the legacy opportunistic behavior available.
+if [[ "${OSTYPE:-}" != msys* && "${OSTYPE:-}" != cygwin* ]] || [ "${AGMSG_SELF_NAME:-off}" != off ]; then
+  # A seat that reads its inbox names its own pane if it is not named
+  # (self-name.sh); see send.sh. Best-effort, never fails the read.
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/lib/self-name.sh"
+  agmsg_self_name_on_action "$TEAM" "$AGENT"
+  # Fix its own CLI session name once, early (self-rename.sh, #1081). Best-effort.
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/lib/self-rename.sh"
+  agmsg_self_rename_on_action "$TEAM" "$AGENT"
+fi
 
 # An inbox check must not create the store, so a team that has never been
 # written to has no file yet. Since the stores split per team that is the

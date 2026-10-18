@@ -105,8 +105,8 @@ module.exports = { address, query, listen, activate };
 if (require.main === module) {
   (async () => {
     const [action, project, team, name, thread] = process.argv.slice(2);
-    if (process.platform !== "win32" || !["status", "repair", "stop"].includes(action) || !project || !team || !name || !thread) {
-      throw new Error("Usage: monitor-control.js status|repair|stop <project> <team> <name> <thread>");
+    if (process.platform !== "win32" || !["status", "repair", "stop", "delivery-accept", "delivery-retry"].includes(action) || !project || !team || !name || !thread) {
+      throw new Error("Usage: monitor-control.js status|repair|stop|delivery-accept|delivery-retry <project> <team> <name> <thread>");
     }
     if ([team, name].some((value) => /[/\\\x00-\x1f]/.test(value) || value === "." || value === "..")) {
       throw new Error("invalid team or agent name");
@@ -114,6 +114,29 @@ if (require.main === module) {
     const path = require("path");
     const root = path.resolve(__dirname, "../../../..");
     const pipe = address(root, project, [{ team, name }]);
+    if (action.startsWith("delivery-")) {
+      const recovery = await listen(pipe, () => ({ready:false}), () => Promise.reject(new Error("delivery recovery in progress")));
+      try {
+        const file = path.join(root, "run", `codex-bridge.${team}.${name}.delivery.json`);
+        const receipt = JSON.parse(fs.readFileSync(file, "utf8"));
+        if (receipt.version !== 1 || receipt.thread !== thread ||
+            JSON.stringify(receipt.identities) !== JSON.stringify([{team, name}]) ||
+            fs.realpathSync(receipt.project).toLowerCase() !== fs.realpathSync(project).toLowerCase()) {
+          throw new Error("delivery receipt does not match the requested session");
+        }
+        if (action === "delivery-retry") {
+          if (receipt.phase === "accepted") throw new Error("accepted delivery cannot be retried; use delivery-accept");
+          fs.unlinkSync(file);
+        } else {
+          receipt.phase = "accepted";
+          const tmp = `${file}.${process.pid}.tmp`;
+          try { fs.writeFileSync(tmp, JSON.stringify(receipt), {flag:"wx", mode:0o600}); fs.renameSync(tmp, file); }
+          finally { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); }
+        }
+        console.log("Delivery decision recorded; run agmsg mode monitor in the owning session.");
+      } finally { await new Promise((resolve) => recovery.close(resolve)); }
+      return;
+    }
     let status;
     // A legacy bridge may still be blocked in a slow synchronous Bash check.
     // Let it answer before validating the exact thread and asking it to stop.
@@ -121,7 +144,7 @@ if (require.main === module) {
       if (action === "stop" && ["ENOENT", "ECONNREFUSED"].includes(error.code)) return;
       throw error;
     }
-    if (!status.ready || status.thread !== thread || !Number.isInteger(status.pid) || status.pid <= 0) {
+    if ((action !== "stop" && !status.ready) || status.thread !== thread || !Number.isInteger(status.pid) || status.pid <= 0) {
       throw new Error("no armed monitor for the requested thread");
     }
     if (action === "stop") {

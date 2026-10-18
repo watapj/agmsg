@@ -17,7 +17,7 @@ PROJECT="$(agmsg_canonical_path "${1:?project required}")"
 source "$SKILL_DIR/scripts/lib/poke-mode.sh"
 if [ -f "$(agmsg_poke_mode_path codex "$PROJECT")" ]; then
   echo 'Codex monitor is disabled while poke mode is selected.' >&2
-  exit 1
+  exit 3
 fi
 thread="${2:-${CODEX_THREAD_ID:-}}"
 case "$thread" in ''|*[!a-zA-Z0-9._-]*) echo 'Codex monitor requires CODEX_THREAD_ID.' >&2; exit 1 ;; esac
@@ -25,10 +25,11 @@ pair="$(agmsg_role_session_match_unique codex "$PROJECT" "$thread" || true)"
 if [ -z "$pair" ]; then
   # shellcheck disable=SC2016 # Literal skill invocation, not a shell variable.
   echo 'No unique role belongs to this thread. Run $agmsg actas <name>, then $agmsg mode monitor.' >&2
+  if [ "$check" = 1 ]; then exit 75; fi
   exit 1
 fi
-registered="$("$SKILL_DIR/scripts/identities.sh" "$PROJECT" codex)"
-printf '%s\n' "$registered" | cut -f1,2 | grep -Fxq "$pair" || exit 1
+registered="$("$SKILL_DIR/scripts/identities.sh" "$PROJECT" codex)" || exit 75
+printf '%s\n' "$registered" | cut -f1,2 | grep -Fxq "$pair" || exit 3
 if [ "$check" = 1 ]; then printf '%s\n' "$pair"; exit 0; fi
 
 # shellcheck source=./_app-server.sh

@@ -1175,7 +1175,7 @@ source "$SCRIPT_DIR/lib/watch-stuck-map.sh"
 # Shortly before the cap, at the top of a cycle (so nothing is mid-delivery and
 # the read cursor has already been consumed), the watcher decides for itself and
 # prints one line on stdout -- one notification per cycle:
-#   - it delivered something this run, or AGMSG_CC_MONITOR_KEEP_ALIVE is set:
+#   - it delivered something this run, or keep-alive is not explicitly off:
 #     "agmsg watch: re-arm ..." naming the command and description to hand back
 #     to Monitor unchanged;
 #   - otherwise "agmsg watch: stopping ...": nothing to renew.
@@ -1191,7 +1191,7 @@ unset AGMSG_WATCH_ELAPSED_BASE AGMSG_WATCH_DELIVERED_BASE
 _watch_renew_or_stop() {
   local elapsed=$((SECONDS + _WATCH_ELAPSED_BASE)) cmd desc arg
   [ "$elapsed" -ge "$WATCH_MAX_SECONDS" ] || return 0
-  if [ "$_WATCH_DELIVERED" -gt 0 ] || [ -n "${AGMSG_CC_MONITOR_KEEP_ALIVE:-}" ]; then
+  if [ "$_WATCH_DELIVERED" -gt 0 ] || [ "${AGMSG_CC_MONITOR_KEEP_ALIVE:-on}" != off ]; then
     cmd="$(printf '%q' "$SCRIPT_DIR/watch.sh")"
     for arg in "${ORIG_ARGS[@]}"; do
       cmd="$cmd $(printf '%q' "$arg")"
@@ -1200,7 +1200,7 @@ _watch_renew_or_stop() {
     [ -n "$ACTIVE_NAME" ] && desc="$desc (acting as $ACTIVE_NAME)"
     watch_report "re-arm - this watch is about to reach the host's time cap; invoke the Monitor tool again with command: $cmd description: $desc persistent: true timeout_ms: 1800000"
   else
-    watch_report "stopping - no messages were delivered in the last ${elapsed}s, so this watch is not re-armed (set AGMSG_CC_MONITOR_KEEP_ALIVE to keep it running)"
+    watch_report "stopping - no messages were delivered in the last ${elapsed}s and AGMSG_CC_MONITOR_KEEP_ALIVE=off; unset it to keep receiving"
   fi
   exit 0
 }
@@ -1618,11 +1618,16 @@ EOF
       # cursor-only page is valid, so advance it without optional IDs in that
       # case (and preserve exact delivered IDs when there are any).
       if [ "${#DELIVERED_IDS[@]}" -gt 0 ]; then
-        storage_read_cursor_consume "$pair_team" "$pair_agent" "$FINAL_CURSOR" \
-          "${DELIVERED_IDS[@]}" >/dev/null 2>&1 || true
+        if ! storage_read_cursor_consume "$pair_team" "$pair_agent" "$FINAL_CURSOR" \
+          "${DELIVERED_IDS[@]}" >/dev/null 2>&1; then
+          watch_report "delivery receipt failed for $pair_team/$pair_agent ids=${DELIVERED_IDS[*]}; stopping to avoid repeated delivery; inspect history before re-arming"
+          exit 75
+        fi
       else
-        storage_read_cursor_consume "$pair_team" "$pair_agent" "$FINAL_CURSOR" \
-          >/dev/null 2>&1 || true
+        if ! storage_read_cursor_consume "$pair_team" "$pair_agent" "$FINAL_CURSOR" >/dev/null 2>&1; then
+          watch_report "cursor update failed for $pair_team/$pair_agent; stopping; inspect storage permissions before re-arming"
+          exit 75
+        fi
       fi
     fi
     # Third test seam, parked between consume and the fold. Seams follow GUARDS,
@@ -1701,7 +1706,10 @@ EOF
         if [ "$_pair_verdict" -ne 0 ]; then
           _report_pair_refusal "$_pair_verdict" "$pair_team" "$pair_agent" "marking them read"
         else
-          storage_read_cursor_consume "$pair_team" "$pair_agent" "$FINAL_CURSOR" >/dev/null 2>&1 || true
+          if ! storage_read_cursor_consume "$pair_team" "$pair_agent" "$FINAL_CURSOR" >/dev/null 2>&1; then
+            watch_report "cursor update failed for $pair_team/$pair_agent; stopping; inspect storage permissions before re-arming"
+            exit 75
+          fi
         fi
       fi
     fi
