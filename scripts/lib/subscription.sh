@@ -11,14 +11,14 @@ agmsg_sql_escape() { printf '%s' "$1" | sed "s/'/''/g"; }
 # Resolve the (team, agent) rows this process should receive for.
 #
 # Usage:
-#   agmsg_subscription_pairs <project> <type> <owner_id> [active_name] [claim]
+#   agmsg_subscription_pairs <project> <type> <owner_id> [active_name] [claim] [requested_pairs]
 #
 # `owner_id` is the current session/instance token used for actas ownership.
-# When `active_name` is set, only that agent name is kept. When the final
+# When `active_name` is set, only that agent name is kept. When the fifth
 # argument is `claim`, the helper attempts to claim each active pair for
 # `owner_id`, matching watch.sh actas mode.
 agmsg_subscription_pairs() {
-  local project="$1" type="$2" owner_id="$3" active_name="${4:-}" claim_mode="${5:-}"
+  local project="$1" type="$2" owner_id="$3" active_name="${4:-}" claim_mode="${5:-}" requested="${6:-}"
   local scripts_dir="$SKILL_DIR/scripts"
   local pairs filtered skipped skip_facts held state result cc
 
@@ -36,6 +36,14 @@ agmsg_subscription_pairs() {
   local team agent
   while IFS=$'\t' read -r team agent; do
     [ -z "$team" ] && continue
+    # Intersect registered pairs before checking locks. A bridge for one role
+    # must not pay for every other role's ownership and liveness probes.
+    if [ -n "$requested" ]; then
+      case $'\n'"$requested"$'\n' in
+        *$'\n'"$team"$'\t'"$agent"$'\n'*) ;;
+        *) continue ;;
+      esac
+    fi
     state=$(actas_lock_state "$team" "$agent" "$owner_id")
     case "$state" in
       # `unknown:` is not "free to subscribe". Falling through would keep the

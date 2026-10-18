@@ -68,6 +68,7 @@ case "$INTERVAL" in ''|*[!0-9]*) echo "watch-once: --interval must be a whole nu
 [ "$INTERVAL" -gt 0 ] || INTERVAL=1
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck disable=SC2034 # required by sourced storage/subscription libraries
 SKILL_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 source "$SCRIPT_DIR/../../../lib/storage.sh"
 agmsg_storage_load
@@ -80,17 +81,9 @@ source "$SCRIPT_DIR/../../../lib/subscription.sh"
 
 PROJECT_PATH="$(agmsg_resolve_project "$PROJECT_PATH" "$AGENT_TYPE")"
 
-PAIRS="$(agmsg_subscription_pairs "$PROJECT_PATH" "$AGENT_TYPE" "$OWNER_ID" "$ACTIVE_NAME")" || exit 1
+PAIRS="$(agmsg_subscription_pairs "$PROJECT_PATH" "$AGENT_TYPE" "$OWNER_ID" "$ACTIVE_NAME" "" "$PAIR_FILTERS")" || exit 1
 if [ -n "$TEAM_FILTER" ]; then
   PAIRS=$(printf '%s\n' "$PAIRS" | awk -v t="$TEAM_FILTER" -F'\t' 'NF >= 2 && $1 == t')
-fi
-if [ -n "$PAIR_FILTERS" ]; then
-  selected=""
-  while IFS=$'\t' read -r team agent; do
-    printf '%s\n' "$PAIR_FILTERS" | grep -Fxq "${team}"$'\t'"${agent}" || continue
-    selected="${selected:+$selected$'\n'}${team}"$'\t'"${agent}"
-  done <<< "$PAIRS"
-  PAIRS="$selected"
 fi
 
 if [ -z "$PAIRS" ]; then
