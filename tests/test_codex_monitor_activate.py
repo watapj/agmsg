@@ -166,6 +166,9 @@ function handle(line){
         status = subprocess.run(command + ["status"] + args, env=self.env, capture_output=True, text=True, timeout=10)
         self.assertEqual(status.returncode, 0, status.stderr)
         self.assertEqual(status.stdout.strip(), native_pid)
+        wrong_status = subprocess.run(command + ["status"] + args[:-1] + ["wrong-thread"],
+                                      env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(wrong_status.returncode, 0)
         self.assertEqual(pidfile.read_text(encoding="utf-8").strip(), "99999999")
         wrong = subprocess.run(command + ["repair"] + args[:-1] + ["wrong-thread"],
                                env=self.env, capture_output=True, text=True, timeout=10)
@@ -270,6 +273,10 @@ bash "$SKILL_DIR/scripts/drivers/types/codex/codex-monitor-activate.sh" --check 
             time.sleep(.1)
         self.assertIn("role verification unavailable", self.bridge_log())
         self.assertTrue((self.skill / "run/codex-bridge.team.alice.pid").exists())
+        status = subprocess.run(["node", str(self.driver / "monitor-control.js"), "status",
+                                 str(self.project), "team", "alice", self.thread], env=self.env,
+                                capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(status.returncode, 0)
         result = subprocess.run(["node", str(self.driver / "monitor-control.js"), "stop",
                                  str(self.project), "team", "alice", self.thread], env=self.env,
                                 capture_output=True, text=True, timeout=10)

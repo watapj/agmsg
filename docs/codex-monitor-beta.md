@@ -21,9 +21,16 @@ The skill invokes `delivery.sh set monitor codex "$PWD"` outside the tool sandbo
 That command configures hooks, starts the native dispatcher with this project
 allowed, and attaches the bridge to this thread's existing app-server. It does not
 launch another TUI, install a shell profile shim or register an OS startup task.
-Only `Codex monitor receiving: ...` confirms that the watcher is armed. Hook
-configuration can succeed even when runtime attachment fails; inspect the error
-and `run/codex-bridge.<team>.<name>.log` in that case. Run `$agmsg mode` for status.
+`Codex monitor receiving: ...` confirms that the watcher is armed. A subsequent
+`$agmsg mode` status showing the same role as `receiving` with this exact current
+thread ID is also a valid confirmation. Another thread's status does not confirm
+receiving in this session. Wait for the enable command to finish: if the execution
+tool returns a running session ID, retain it and collect the remaining output and
+exit code. The startup banner can appear after the first partial result. Missing
+partial output is not an activation failure, and a confirmed receiver need not
+be restarted just to reproduce the banner. Report command errors separately;
+hook configuration can succeed even when attachment fails. Inspect the error and
+`run/codex-bridge.<team>.<name>.log` in that case.
 
 This path requires an existing reachable server: an agmsg seat endpoint or
 Codex 0.163's shared local app-server via `codex app-server proxy`. The exact
