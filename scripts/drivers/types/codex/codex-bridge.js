@@ -1035,6 +1035,9 @@ class CodexBridge {
     this.lastArmAt = 0;
     this.inlineInboxText = "";
     this.stopping = false;
+    this.deliveryPhase = "starting";
+    this.deliveryPhaseAt = Date.now();
+    this.deliveryRetryCount = 0;
     const key = identities.length === 1
       ? `${identities[0].team}.${identities[0].name}`
       : crypto.createHash("sha1").update(identities.map((p) => `${p.team}\t${p.name}`).join("\n")).digest("hex");
@@ -1057,8 +1060,7 @@ class CodexBridge {
       const control = require("./monitor-control");
       this.controlServer = await control.listen(
         control.address(SKILL_DIR, this.opts.project, this.identities),
-        () => ({ ready: !!this.monitorReady, attached: !!this.opts.attachCurrent,
-          thread: this.threadId, appServer: this.opts.appServer, pid: process.pid }),
+        () => this.runtimeStatus(),
         () => this.shutdown(),
         () => process.exit(0),
       );
@@ -1108,7 +1110,7 @@ class CodexBridge {
     if (process.connected) process.send({ ready: true, thread: this.threadId, appServer: this.opts.appServer, pid: process.pid });
     if (this.opts.attachCurrent) {
       this.attachTimer = setInterval(() => {
-        if (this.attachCheckPending || this.stopping) return;
+        if (this.attachCheckPending || this.stopping || this.deliveryInFlight || this.deliveryRetryTimer || this.deliveryRetryExhausted) return;
         this.attachCheckPending = true;
         this.checkCurrentThread().then(() => {
           if (this.pendingWake) return this.tryStartTurn();
@@ -1116,6 +1118,7 @@ class CodexBridge {
           if (this.stopping) return;
           if (!error.roleCheckUnavailable) { this.failClientHandler("current-session check", error); return; }
           this.monitorReady = false;
+          this.roleCheckError = error.message;
           console.error(`codex-bridge: role verification unavailable; delivery paused: ${error.message}`);
         })
           .finally(() => { this.attachCheckPending = false; });
@@ -1140,6 +1143,7 @@ class CodexBridge {
       throw new Error("current thread project does not match the requested project");
     }
     // Slow MSYS startup must not block control-pipe stop/status requests.
+    const roleStartedAt = Date.now();
     const role = await new Promise((resolve, reject) => {
       const child = spawn(BASH_BIN, [path.join(SCRIPT_DIR, "codex-monitor-activate.sh"), "--check", this.opts.scriptProject, this.threadId], {
         cwd: SKILL_DIR, windowsHide: true, timeout: 30000, stdio: ["ignore", "pipe", "pipe"],
@@ -1163,11 +1167,12 @@ class CodexBridge {
     if (role.status !== 0 || role.stdout.trim() !== `${this.identity.team}\t${this.identity.name}`) {
       const lost = role.status === 3 || role.status === 0;
       const error = new Error(lost ? "current thread no longer owns this role; run agmsg actas first" :
-        `role helper failed (${role.status}): ${role.stderr.trim()}`);
+        `role helper failed (codex-monitor-activate.sh --check; elapsed=${Date.now() - roleStartedAt}ms; budget=30000ms; exit=${role.status}): ${role.stderr.trim()}`);
       error.roleCheckUnavailable = !lost;
       throw error;
     }
-    if (this.monitorInitialized) this.monitorReady = true;
+    this.roleCheckError = "";
+    if (this.monitorInitialized && !this.deliveryPaused) this.monitorReady = true;
   }
 
   // Write the seat from the thread the bridge actually armed on (#579). Seating
@@ -1511,6 +1516,7 @@ class CodexBridge {
       throw error;
     }
     console.error(`codex-bridge: armed ${this.identity.team}/${this.identity.name}`);
+    this.setDeliveryPhase("watching");
   }
 
   async onProcessExited(params) {
@@ -1578,6 +1584,7 @@ class CodexBridge {
     if (type === "active") {
       this.turnActive = true;
       this.threadIdle = false;
+      if (!this.deliveryInFlight) this.setDeliveryPhase("turn-active");
       // See the identical comment on the "turn/started" handler in run() --
       // this transition can also happen without tryStartTurn() ever calling
       // startTurnWatchdog() itself. See #299.
@@ -1606,6 +1613,7 @@ class CodexBridge {
     this.activeTurnId = id;
     this.turnActive = true;
     this.threadIdle = false;
+    if (!this.deliveryInFlight) this.setDeliveryPhase("turn-active");
     // TUI turns need the same idle watchdog as bridge-originated turns (#299).
     this.startTurnWatchdog();
   }
@@ -1681,9 +1689,17 @@ class CodexBridge {
   }
 
   async tryStartTurn() {
-    if (this.deliveryInFlight || this.stopping) return;
+    if (this.deliveryInFlight || this.stopping || this.deliveryRetryTimer || this.deliveryRetryExhausted) return;
     this.deliveryInFlight = true;
-    try { await this.startDeliveryTurn(); } finally { this.deliveryInFlight = false; }
+    this.turnSubmissionAttempted = false;
+    try { await this.startDeliveryTurn(); } catch (error) {
+      if (!this.stopping && !this.turnSubmissionAttempted && (error.inboxHelperFailure || error.roleCheckUnavailable)) {
+        this.pendingWake = true;
+        this.pauseDelivery(error);
+        return;
+      }
+      throw error;
+    } finally { this.deliveryInFlight = false; }
     if (this.resumeAfterDelivery) {
       this.resumeAfterDelivery = false;
       if (!this.turnActive && !this.stopping) await this.onTurnEnded();
@@ -1695,16 +1711,13 @@ class CodexBridge {
     if (this.opts.attachCurrent) {
       if (this.attachTurnCheck) return;
       this.attachTurnCheck = true;
-      try { await this.checkCurrentThread(); } catch (error) {
-        if (!error.roleCheckUnavailable) throw error;
-        this.monitorReady = false;
-        console.error(`codex-bridge: delivery paused until role verification recovers: ${error.message}`);
-        return;
-      } finally { this.attachTurnCheck = false; }
+      this.setDeliveryPhase("checking-session");
+      try { await this.checkCurrentThread(); } finally { this.attachTurnCheck = false; }
       if (this.stopping || !this.pendingWake || this.turnActive || !this.threadIdle) return;
     }
     if (this.opts.inlineInbox) {
       this.inlineInboxText = await this.readInboxForPrompt();
+      this.clearDeliveryPause();
       // A TUI turn can start while the asynchronous snapshot is being read.
       // Keep the wake unread and defer it until that turn finishes.
       if (this.stopping || this.turnActive || !this.threadIdle) return;
@@ -1715,6 +1728,7 @@ class CodexBridge {
         return;
       }
     }
+    if (!this.opts.inlineInbox) this.clearDeliveryPause();
     const prompt = this.buildPrompt();
     this.turnActive = true;
     this.threadIdle = false;
@@ -1729,12 +1743,15 @@ class CodexBridge {
     this.inFlightTurnEnded = false;
     try {
       if (this.opts.inlineInbox) this.writeDelivery("submitting");
+      this.turnSubmissionAttempted = true;
+      this.setDeliveryPhase("submitting");
       await this.client.request("turn/start", {
         threadId: this.threadId,
         input: [{ type: "text", text: prompt, text_elements: [] }],
         cwd: this.opts.project,
         runtimeWorkspaceRoots: this.opts.workspaceRoots,
       });
+      console.error(`codex-bridge: started turn on thread ${this.threadId}; runtime accepted payload`);
       this.startInFlight = false;
       if (this.inFlightTurnEnded) {
         this.inFlightTurnEnded = false;
@@ -1744,7 +1761,7 @@ class CodexBridge {
         this.writeDelivery("accepted");
         await this.ackDelivery();
       }
-      console.error(`codex-bridge: started turn on thread ${this.threadId}`);
+      this.setDeliveryPhase(this.turnActive ? "turn-active" : "idle");
       // Bound how long we treat the turn as active. The real app-server may
       // never send turn/completed; the watchdog (and thread/status idle) drive
       // onTurnEnded so detection re-arms instead of sleeping forever. See #41.
@@ -1758,6 +1775,45 @@ class CodexBridge {
       throw error;
     } finally {
       this.startInFlight = false;
+    }
+  }
+
+  setDeliveryPhase(phase) {
+    this.deliveryPhase = phase;
+    this.deliveryPhaseAt = Date.now();
+  }
+
+  runtimeStatus() {
+    return { ready: !!this.monitorReady && !this.deliveryPaused, attached: !!this.opts.attachCurrent,
+      thread: this.threadId, appServer: this.opts.appServer, pid: process.pid,
+      phase: this.roleCheckError ? "role-check-paused" : this.turnActive && this.pendingWake && !this.deliveryInFlight && !this.deliveryPaused ? "waiting-for-turn" : this.deliveryPhase,
+      elapsedMs: Date.now() - (this.inboxHelper?.startedAt || this.deliveryPhaseAt || Date.now()),
+      helper: this.inboxHelper?.name || "", retries: this.deliveryRetryCount || 0,
+      lastError: this.deliveryError || this.roleCheckError || "" };
+  }
+
+  clearDeliveryPause() {
+    this.deliveryPaused = false;
+    this.deliveryRetryExhausted = false;
+    this.deliveryError = "";
+    this.deliveryRetryCount = 0;
+    if (this.monitorInitialized) this.monitorReady = true;
+  }
+
+  pauseDelivery(error) {
+    this.deliveryPaused = true;
+    this.monitorReady = false;
+    this.deliveryError = error.message;
+    this.deliveryRetryCount = (this.deliveryRetryCount || 0) + 1;
+    const delay = [5000, 15000, 45000][this.deliveryRetryCount - 1];
+    this.deliveryRetryExhausted = delay === undefined;
+    this.setDeliveryPhase(this.deliveryRetryExhausted ? "paused" : "retry-wait");
+    console.error(`codex-bridge: delivery paused before turn submission: ${error.message}; ${this.deliveryRetryExhausted ? "retry limit reached; stop this role's monitor and enable it again" : `retry ${this.deliveryRetryCount}/3 in ${delay}ms`}`);
+    if (!this.deliveryRetryExhausted) {
+      this.deliveryRetryTimer = setTimeout(() => {
+        this.deliveryRetryTimer = null;
+        this.tryStartTurn().catch((cause) => this.failClientHandler("delivery retry", cause));
+      }, delay);
     }
   }
 
@@ -1855,10 +1911,13 @@ class CodexBridge {
     ].join("\n");
   }
 
-  async runInboxHelper(args) {
+  async runInboxHelper(args, timeoutMs = process.platform === "win32" ? 60000 : 30000) {
     return new Promise((resolve, reject) => {
+      const startedAt = Date.now();
+      const name = `${path.basename(args[0])}${args.includes("--snapshot") ? " --snapshot" : args.includes("--ack") ? " --ack" : ""}`;
+      this.inboxHelper = { name, startedAt };
       const child = spawn(BASH_BIN, args, {
-        cwd: this.opts.project, windowsHide: true, timeout: 30000,
+        cwd: this.opts.project, windowsHide: true, timeout: timeoutMs,
         env: { ...process.env, AGMSG_SELF_NAME: "off", AGMSG_SELF_RENAME: "off" },
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -1871,13 +1930,18 @@ class CodexBridge {
         if (Buffer.byteLength(stdout) > 8 * 1024 * 1024) { overflow = true; child.kill(); }
       });
       child.stderr.on("data", (chunk) => { stderr = (stderr + chunk).slice(-4096); });
-      child.on("error", reject);
+      const fail = (detail) => {
+        const error = new Error(`inbox helper failed (${name}; elapsed=${Date.now() - startedAt}ms; budget=${timeoutMs}ms; ${detail}): ${stderr.trim()}`);
+        error.inboxHelperFailure = true;
+        reject(error);
+      };
+      child.on("error", (error) => fail(error.message));
       child.on("exit", (_code, signal) => {
         if (signal) { child.stdout.destroy(); child.stderr.destroy(); }
       });
       child.on("close", (code, signal) => {
-        if (this.inboxChild === child) this.inboxChild = null;
-        if (code !== 0 || signal || overflow) reject(new Error(`inbox helper failed (${overflow ? "output limit" : signal || code}): ${stderr.trim()}`));
+        if (this.inboxChild === child) { this.inboxChild = null; this.inboxHelper = null; }
+        if (code !== 0 || signal || overflow) fail(overflow ? "output limit" : signal || code);
         else resolve(stdout);
       });
     });
@@ -1886,16 +1950,19 @@ class CodexBridge {
   async eligibleInboxPairs() {
     const args = [path.join(SCRIPT_DIR, "eligible-pairs.sh"), this.opts.scriptProject || toPosixPath(this.opts.project), this.opts.type];
     if (this.opts.ownerId) args.push("--owner", this.opts.ownerId);
+    if (this.opts.attachCurrent) args.push("--thread", this.threadId);
     args.push(...this.identities.flatMap((p) => ["--pair", `${p.team}\t${p.name}`]));
     return new Set((await this.runInboxHelper(args)).split(/\r?\n/).filter(Boolean));
   }
 
   async readInboxForPrompt() {
+    this.setDeliveryPhase("checking-owner");
     const allowed = await this.eligibleInboxPairs();
     this.inboxBatch = [];
     const sections = [];
     for (const pair of this.identities) {
       if (!allowed.has(`${pair.team}\t${pair.name}`)) continue;
+      this.setDeliveryPhase("reading-inbox");
       const output = await this.runInboxHelper([path.join(SCRIPTS_DIR, "inbox.sh"), pair.team, pair.name, "--snapshot"]);
       const messages = output.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
       for (const m of messages) {
@@ -1905,6 +1972,7 @@ class CodexBridge {
       if (messages.length) this.inboxBatch.push({ ...pair, ids: messages.map((m) => String(m.id)) });
     }
     if (this.inboxBatch.length) {
+      this.setDeliveryPhase("rechecking-owner");
       const current = await this.eligibleInboxPairs();
       if (this.inboxBatch.some((p) => !current.has(`${p.team}\t${p.name}`))) {
         throw new Error("role ownership changed during inbox snapshot; no turn submitted");
@@ -1939,6 +2007,7 @@ class CodexBridge {
   }
 
   async ackDelivery() {
+    this.setDeliveryPhase("acknowledging");
     const allowed = await this.eligibleInboxPairs();
     for (const pair of this.inboxBatch) {
       if (!allowed.has(`${pair.team}\t${pair.name}`)) throw new Error("delivery accepted, but role ownership changed before acknowledgement");
@@ -1955,6 +2024,7 @@ class CodexBridge {
     this.stopping = true;
     this.monitorReady = false;
     clearInterval(this.attachTimer);
+    clearTimeout(this.deliveryRetryTimer);
     if (this.attachCheckChild) this.attachCheckChild.kill();
     if (this.inboxChild) this.inboxChild.kill();
     if (this.controlServer) this.controlServer.close();

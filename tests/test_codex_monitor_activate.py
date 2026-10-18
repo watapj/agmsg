@@ -397,6 +397,37 @@ bash "$skill/scripts/delivery.sh" set "$1" claude-code "$(cygpath -u "$TEST_PROJ
         self.assertTrue(any(code == 0 for _, code in results), str(results) + self.bridge_log())
         self.assertEqual(sum(m["method"] == "process/spawn" for m in self.requests()), 1)
 
+    def test_prepare_failure_is_visible_and_automatically_recovers(self):
+        (self.driver / "eligible-pairs.sh").write_text("printf 'team\\talice\\n'\n", encoding="utf-8")
+        inbox = self.skill / "scripts/inbox.sh"
+        inbox.write_text("exit 75\n", encoding="utf-8")
+        self.run_bridge("--activate-current", "--inline-inbox", env=dict(self.env, TEST_WAKE="1"))
+        deadline = time.monotonic() + 20
+        while "delivery paused before turn submission" not in self.bridge_log() and time.monotonic() < deadline:
+            time.sleep(.1)
+        self.assertIn("delivery paused before turn submission", self.bridge_log())
+        control = ["node", str(self.driver / "monitor-control.js")]
+        args = [str(self.project), "team", "alice", self.thread]
+        paused = subprocess.run(control + ["describe"] + args, env=self.env,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(paused.returncode, 0, paused.stderr)
+        self.assertIn("paused", paused.stdout)
+        self.assertIn("retry-wait", paused.stdout)
+        self.assertIn("inbox.sh --snapshot", paused.stdout)
+        self.assertIn("last_error", paused.stdout)
+        wrong = subprocess.run(control + ["describe"] + args[:-1] + ["wrong-thread"], env=self.env,
+                               capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(wrong.returncode, 0)
+        self.assertFalse(any(m["method"] == "turn/start" for m in self.requests()))
+        inbox.write_text('case "$3" in --snapshot) printf \'%s\\n\' \'{"team":"team","to":"alice","from":"bob","id":"m1","at":"now","body":"isolated retry message"}\';; esac\n', encoding="utf-8")
+        deadline = time.monotonic() + 25
+        while not any(m["method"] == "turn/start" for m in self.requests()) and time.monotonic() < deadline:
+            time.sleep(.1)
+        turns = [m for m in self.requests() if m["method"] == "turn/start"]
+        self.assertEqual(len(turns), 1, self.bridge_log())
+        self.assertEqual(turns[0]["params"]["threadId"], self.thread)
+        self.assertIn("isolated retry message", turns[0]["params"]["input"][0]["text"])
+
     def test_stop_closes_monitor_and_allows_activation_again(self):
         self.run_bridge("--activate-current")
         self.run_bridge("--stop-attached")

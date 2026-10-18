@@ -83,7 +83,7 @@ async function activate(pipe, script, args, log, expected) {
     if (error.code !== "ENOENT" && error.code !== "ECONNREFUSED") throw error;
   }
   if (existing) {
-    if (!matches(existing)) throw new Error("another monitor owns this role, or monitor is still starting; retry after checking mode status");
+    if (!matches(existing)) throw new Error("another monitor owns this role, or monitor is not ready; retry after checking mode status");
     return existing;
   }
   const fd = fs.openSync(log, "a");
@@ -125,8 +125,8 @@ module.exports = { address, query, listen, activate };
 if (require.main === module) {
   (async () => {
     const [action, project, team, name, thread] = process.argv.slice(2);
-    if (!["status", "repair", "stop", "delivery-accept", "delivery-retry"].includes(action) || !project || !team || !name || !thread) {
-      throw new Error("Usage: monitor-control.js status|repair|stop|delivery-accept|delivery-retry <project> <team> <name> <thread>");
+    if (!["status", "describe", "repair", "stop", "delivery-accept", "delivery-retry"].includes(action) || !project || !team || !name || !thread) {
+      throw new Error("Usage: monitor-control.js status|describe|repair|stop|delivery-accept|delivery-retry <project> <team> <name> <thread>");
     }
     if ([team, name].some((value) => /[/\\\x00-\x1f]/.test(value) || value === "." || value === "..")) {
       throw new Error("invalid team or agent name");
@@ -163,11 +163,19 @@ if (require.main === module) {
       if (action === "stop" && ["ENOENT", "ECONNREFUSED"].includes(error.code)) return;
       throw error;
     }
-    if ((action !== "stop" && !status.ready) || status.thread !== thread || !Number.isInteger(status.pid) || status.pid <= 0) {
+    if ((!["stop", "describe"].includes(action) && !status.ready) || status.thread !== thread || !Number.isInteger(status.pid) || status.pid <= 0) {
       throw new Error("no armed monitor for the requested thread");
     }
     if (action === "stop") {
       await query(pipe, "stop");
+      return;
+    }
+    if (action === "describe") {
+      const clean = (value) => String(value || "").replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 700);
+      const phase = clean(status.phase) || (status.ready ? "watching" : "starting");
+      const state = status.ready ? "receiving" : phase === "starting" ? "starting" : "paused";
+      const elapsed = Number.isFinite(status.elapsedMs) ? Math.max(0, Math.floor(status.elapsedMs / 1000)) : 0;
+      console.log(`Codex bridge: ${team}/${name} ${state} (pid ${status.pid}; thread ${thread}; phase ${phase}; elapsed ${elapsed}s${status.helper ? `; helper ${clean(status.helper)}` : ""}${status.lastError ? `; last_error ${clean(status.lastError)}` : ""})`);
       return;
     }
     if (action === "repair") {

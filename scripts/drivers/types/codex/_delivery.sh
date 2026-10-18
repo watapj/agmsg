@@ -106,7 +106,7 @@ agmsg_delivery_on_poke() {
     local pid attempt=0
     while [ "$attempt" -lt 100 ]; do
       pid="$(cat "$RUN_DIR/codex-bridge.$team.$name.pid" 2>/dev/null || true)"
-      [ -n "$pid" ] && _agmsg_pid_alive "$pid" || break
+      if [ -z "$pid" ] || ! _agmsg_pid_alive "$pid"; then break; fi
       sleep 0.1
       attempt=$((attempt + 1))
     done
@@ -300,7 +300,7 @@ agmsg_codex_report_missing_bridge() {
 agmsg_delivery_runtime_status() {
   local type="$1" project="$2"
   local pairs found=0 any_alive=0
-  local native_node="" current_thread confirmed_pid
+  local native_node="" current_thread confirmed_status
   case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
       native_node="$(agmsg_resolve_node)"
@@ -326,10 +326,10 @@ agmsg_delivery_runtime_status() {
 
     if [ -n "$native_node" ]; then
       current_thread="$(agmsg_role_session_uuid "$team" "$name" 2>/dev/null || true)"
-      if [ -n "$current_thread" ] && confirmed_pid="$("$native_node" \
-        "$(cygpath -m "$SCRIPT_DIR/drivers/types/codex/monitor-control.js")" status \
+      if [ -n "$current_thread" ] && confirmed_status="$("$native_node" \
+        "$(cygpath -m "$SCRIPT_DIR/drivers/types/codex/monitor-control.js")" describe \
         "$(cygpath -m "$project")" "$team" "$name" "$current_thread" 2>/dev/null)"; then
-        echo "Codex bridge: $team/$name receiving (pid $confirmed_pid; thread $current_thread)"
+        printf '%s\n' "$confirmed_status"
         any_alive=1
         continue
       fi

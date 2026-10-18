@@ -44,8 +44,10 @@ See [Codex's launch policy](https://github.com/openai/codex/blob/rust-v0.163.0/c
 
 The native pipe serializes monitor startup for each installation/project/role.
 Startup waits for `thread/resume` and watcher creation; errors remain errors.
-The attached bridge checks thread and role ownership every 15 seconds and
-again before reading an inbox. It exits on a failed check. `mode turn` and
+The attached bridge checks thread and role ownership every 15 seconds between
+deliveries, and again before reading an inbox. A delivery rechecks the exact
+thread's role before submission and acknowledgement. Proven ownership loss
+stops the monitor; temporary helper failures pause it. `mode turn` and
 `mode off` stop attached monitors; these settings apply to all Codex roles in
 the project. They do not stop the shared Codex daemon. Existing launch-wrapper
 sessions retain their existing teardown behavior. The lifecycle dispatcher is
@@ -72,10 +74,32 @@ because this feature creates none.
 ### Delivery receipts and recovery
 
 Inline delivery takes an unread snapshot, submits it to `turn/start`, and
-acknowledges only those message IDs after runtime acceptance. Inbox and role
-checks run asynchronously, with hidden child processes and 30-second helper
-timeouts. A temporary role-helper failure pauses receiving until verification
-recovers; it is not reported as a proven ownership loss.
+acknowledges only those message IDs after runtime acceptance. Helpers run
+asynchronously with hidden child processes. Inbox/ownership helpers have a
+60-second budget on Windows and 30 seconds elsewhere; the current-session
+verification helper retains its 30-second budget. Requested role pairs are
+filtered before ownership probes, so one monitor does not probe unrelated roles.
+
+Before any `turn/start` attempt, a failed helper leaves messages unread and
+automatically retries up to three times, after 5, 15 and 45 seconds. Periodic
+checks do not run concurrently with this delivery or its retry wait. Exhausting
+the retry limit leaves the monitor paused, with stop/status still available.
+An attempted or accepted submission is never automatically resubmitted; its
+receipt must be resolved as described below.
+
+`$agmsg mode` reports `phase`, elapsed time, the active helper and `last_error`.
+`receiving` confirms a healthy receiver, not model completion. `waiting-for-turn`
+means an existing turn must finish before pending messages can be submitted;
+`reading-inbox`, `submitting` and `acknowledging` identify delivery progress.
+`paused`/`retry-wait` are not successful receiving. Helper failures include the
+script/operation, elapsed time and time budget without copying snapshot output.
+If all preparation retries fail, inspect the error, then stop only the affected
+subscription from a normal terminal and run `$agmsg mode monitor` in its owning
+session:
+
+```text
+node <skill-dir>/scripts/drivers/types/codex/monitor-control.js stop <project> <team> <name> <thread-id>
+```
 
 The bridge persists ID-only receipts at
 `run/codex-bridge.<team>.<name>.delivery.json`. An `accepted` receipt is

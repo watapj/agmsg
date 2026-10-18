@@ -189,6 +189,102 @@ const result=await b.runInboxHelper(['-e',"setTimeout(()=>process.stdout.write('
 assert(responsive);assert.equal(result,'ok');
 """)
 
+    def test_pre_submission_helper_failure_pauses_and_retry_delivers_once(self):
+        self.run_js("""
+const helper=b.runInboxHelper.bind(b);let failures=1;
+b.monitorInitialized=true;b.monitorReady=true;
+b.runInboxHelper=async args=>{
+ if(args.includes('--snapshot') && failures-- > 0){
+  const e=new Error('temporary read failure');e.inboxHelperFailure=true;throw e;
+ }
+ return helper(args);
+};
+await b.tryStartTurn();
+assert.equal(starts,0);assert.equal(acks.length,0);assert(b.pendingWake);
+assert(!fs.existsSync(b.deliveryFile));assert(b.deliveryRetryTimer);
+assert.equal(b.runtimeStatus().ready,false);assert.equal(b.runtimeStatus().phase,'retry-wait');
+await b.tryStartTurn();assert.equal(starts,0);
+clearTimeout(b.deliveryRetryTimer);b.deliveryRetryTimer=null;
+await b.tryStartTurn();
+assert.equal(starts,1);assert.equal(acks.length,1);assert(b.runtimeStatus().ready);
+assert.equal(b.deliveryRetryCount,0);assert.equal(b.runtimeStatus().lastError,'');
+""")
+
+    def test_pre_submission_retries_stop_after_three_retries(self):
+        self.run_js("""
+b.readInboxForPrompt=async()=>{const e=new Error('read blocked');e.inboxHelperFailure=true;throw e;};
+for(let n=0;n<4;n++){
+ await b.tryStartTurn();
+ if(b.deliveryRetryTimer){clearTimeout(b.deliveryRetryTimer);b.deliveryRetryTimer=null;}
+}
+assert(b.deliveryRetryExhausted);assert.equal(b.runtimeStatus().phase,'paused');
+assert(!b.runtimeStatus().ready);assert(b.pendingWake);
+await b.tryStartTurn();assert.equal(b.deliveryRetryCount,4);assert.equal(starts,0);
+""")
+
+    def test_current_thread_binding_is_checked_again_after_snapshot(self):
+        self.run_js("""
+b.opts.attachCurrent=true;b.checkCurrentThread=async()=>{};
+const helper=b.runInboxHelper.bind(b);let checks=0;
+b.runInboxHelper=async args=>{
+ if(args[0].endsWith('eligible-pairs.sh')){
+  assert.equal(args[args.indexOf('--thread')+1],'thread');
+  if(++checks===2){const e=new Error('thread role changed');e.inboxHelperFailure=true;throw e;}
+ }
+ return helper(args);
+};
+await b.tryStartTurn();
+clearTimeout(b.deliveryRetryTimer);b.deliveryRetryTimer=null;
+assert.equal(checks,2);assert.equal(starts,0);assert.equal(acks.length,0);
+assert(b.deliveryPaused);assert(!fs.existsSync(b.deliveryFile));
+""")
+
+    def test_ack_helper_failure_never_schedules_a_new_turn(self):
+        self.run_js("""
+const helper=b.runInboxHelper.bind(b);
+b.runInboxHelper=async args=>{
+ if(args.includes('--ack')){const e=new Error('ack blocked');e.inboxHelperFailure=true;throw e;}
+ return helper(args);
+};
+await assert.rejects(b.tryStartTurn(),/ack blocked/);
+assert.equal(starts,1);assert(!b.deliveryRetryTimer);
+assert.equal(JSON.parse(fs.readFileSync(b.deliveryFile,'utf8')).phase,'accepted');
+""")
+
+    def test_real_helper_timeout_reports_stage_and_elapsed_and_is_retryable(self):
+        self.run_js(r"""
+b.runInboxHelper=CodexBridge.prototype.runInboxHelper;
+await assert.rejects(b.runInboxHelper(['-e','setTimeout(()=>{},10000)'],200),e=>{
+ assert(e.inboxHelperFailure);assert.match(e.message,/elapsed=\d+ms/);
+ assert.match(e.message,/budget=200ms/);assert.match(e.message,/-e/);return true;
+});
+assert(!b.inboxHelper);assert(!b.inboxChild);
+""")
+
+    def test_scheduled_retry_automatically_starts_a_turn(self):
+        self.run_js("""
+const savedTimeout=global.setTimeout;let timer;
+global.setTimeout=(fn,delay)=>{timer={fn,delay};return timer;};
+let blocked=true;
+const helper=b.runInboxHelper.bind(b);
+b.runInboxHelper=async args=>{
+ if(blocked){const e=new Error('temporary');e.inboxHelperFailure=true;throw e;}
+ return helper(args);
+};
+await b.tryStartTurn();assert.equal(timer.delay,5000);assert.equal(starts,0);
+blocked=false;timer.fn();await new Promise(setImmediate);
+assert.equal(starts,1);assert.equal(acks.length,1);assert(!b.deliveryRetryTimer);
+global.setTimeout=savedTimeout;
+""")
+
+    def test_shutdown_cancels_a_scheduled_delivery_retry(self):
+        self.run_js("""
+b.pauseDelivery(new Error('temporary'));
+b.client.stop=()=>{};b.cleanupMeta=()=>{};
+await b.shutdown();
+assert(b.stopping);assert(b.deliveryRetryTimer._destroyed);
+""")
+
     def test_shutdown_cancels_inbox_helper(self):
         self.run_js("""
 b.runInboxHelper=CodexBridge.prototype.runInboxHelper;
