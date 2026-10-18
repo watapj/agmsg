@@ -174,12 +174,16 @@ _orca_show_json() {   # <id>
   orca terminal show --terminal "$bare" --json 2>/dev/null
 }
 
+# Native executable argv limits are smaller than a multi-pane layout response.
+# Pass SQL containing terminal JSON on stdin, never as one OS argument.
+_orca_sql() { printf '%s\n' "$1" | sqlite3 :memory:; }
+
 # 0 when <json> is a valid JSON document; non-zero otherwise. Uses sqlite3's
 # JSON1 extension (the codebase's no-jq convention — see herdr's ops.sh).
 _orca_json_valid() {   # <json>
   local esc valid
   esc="$(printf '%s' "$1" | sed "s/'/''/g")"
-  valid="$(sqlite3 :memory: "SELECT json_valid('$esc')" 2>/dev/null)" || return 1
+  valid="$(_orca_sql "SELECT json_valid('$esc')" 2>/dev/null)" || return 1
   [ "$valid" = 1 ]
 }
 
@@ -195,7 +199,7 @@ _orca_json_valid() {   # <json>
 _orca_json_field() {   # <json> <path> <type>
   local esc="$1" path="$2" type="$3"
   esc="$(printf '%s' "$esc" | sed "s/'/''/g")"
-  sqlite3 :memory: "SELECT CASE WHEN json_type('$esc','$path')='$type' THEN json_extract('$esc','$path') ELSE '' END" 2>/dev/null
+  _orca_sql "SELECT CASE WHEN json_type('$esc','$path')='$type' THEN json_extract('$esc','$path') ELSE '' END" 2>/dev/null
 }
 
 # Print 1 / 0 for a JSON boolean field at <path>, or nothing if it is
@@ -203,7 +207,7 @@ _orca_json_field() {   # <json> <path> <type>
 _orca_json_bool() {   # <json> <path>
   local esc="$1" path="$2" t
   esc="$(printf '%s' "$esc" | sed "s/'/''/g")"
-  t="$(sqlite3 :memory: "SELECT json_type('$esc','$path')" 2>/dev/null)"
+  t="$(_orca_sql "SELECT json_type('$esc','$path')" 2>/dev/null)"
   case "$t" in
     true)  printf '1\n' ;;
     false) printf '0\n' ;;
@@ -893,7 +897,7 @@ terminal_expected_label() {   # <team> <agent>
 # round-tripped the exact string, while that same pane's `show`/`list`
 # per-pane `.title` stayed at its auto-generated value throughout.
 terminal_team_observe() {
-  local id="$1" bare json ok esc tabid wtid wesc lidx tabtype tesc tidx titlepath hascontrol title
+  local id="$1" bare json ok esc result count hascontrol title
   command -v orca >/dev/null 2>&1 || return 10
   command -v sqlite3 >/dev/null 2>&1 || return 10
   bare="$(_orca_bare_of "$id")" || return 13
@@ -904,37 +908,44 @@ terminal_team_observe() {
   ok="$(_orca_json_bool "$json" '$.ok')"
   [ "$ok" = 1 ] || return 10
   esc="$(printf '%s' "$json" | sed "s/'/''/g")"
-  # tabid/wtid are opaque, orca-generated UUIDs (never typed text a rename
-  # can put a control character into), used here only as WHERE-clause join
-  # keys -- unlike title below, there is no untrusted-content path into them,
-  # so the same trailing-newline hazard does not apply.
-  tabid="$(sqlite3 :memory: "SELECT json_extract(value,'\$.tabId') FROM json_each('$esc','\$.result.terminals') WHERE json_extract(value,'\$.handle')='$bare' LIMIT 1" 2>/dev/null)"
-  wtid="$(sqlite3 :memory: "SELECT json_extract(value,'\$.worktreeId') FROM json_each('$esc','\$.result.terminals') WHERE json_extract(value,'\$.handle')='$bare' LIMIT 1" 2>/dev/null)"
-  [ -n "$tabid" ] && [ -n "$wtid" ] || return 10
-  wesc="$(printf '%s' "$wtid" | sed "s/'/''/g")"
-  lidx="$(sqlite3 :memory: "SELECT key FROM json_each('$esc','\$.result.visualLayouts') WHERE json_extract(value,'\$.worktreeId')='$wesc' LIMIT 1" 2>/dev/null)"
-  [ -n "$lidx" ] || return 10
-  case "$lidx" in *[!0-9]*) return 10 ;; esac
-  tabtype="$(sqlite3 :memory: "SELECT json_type('$esc','\$.result.visualLayouts[$lidx].root.tabs')" 2>/dev/null)"
-  [ "$tabtype" = array ] || return 10
-  tesc="$(printf '%s' "$tabid" | sed "s/'/''/g")"
-  tidx="$(sqlite3 :memory: "SELECT key FROM json_each('$esc','\$.result.visualLayouts[$lidx].root.tabs') WHERE json_extract(value,'\$.tabId')='$tesc' LIMIT 1" 2>/dev/null)"
-  [ -n "$tidx" ] || return 10
-  case "$tidx" in *[!0-9]*) return 10 ;; esac
-  # title IS untrusted, agmsg-written free text (whatever terminal_name's
-  # rename set) that gets compared against an EXPECTED identity string
-  # upstream -- a false match here is a false positive on identity, not just
-  # a cosmetic wrong label. Command substitution unconditionally strips every
-  # trailing newline, so checking the ALREADY-EXTRACTED bash variable for a
-  # tab/newline/CR (as this driver's other observe-style reads do) would miss
-  # a title whose JSON value legitimately ends in one or more \n — it would
-  # come back looking identical to the same title without them, a silent
-  # false match review (#1467) actually caught. So the check runs on the JSON
-  # value itself, via sqlite, BEFORE any command substitution touches it.
-  titlepath="\$.result.visualLayouts[$lidx].root.tabs[$tidx].title"
-  hascontrol="$(sqlite3 :memory: "SELECT CASE WHEN instr(json_extract('$esc','$titlepath'),char(9))>0 OR instr(json_extract('$esc','$titlepath'),char(10))>0 OR instr(json_extract('$esc','$titlepath'),char(13))>0 THEN 1 ELSE 0 END" 2>/dev/null)"
+  # A split layout nests tab groups under first/second. Match the exact
+  # worktree and tab anywhere in that tree, refusing duplicate matches. Check
+  # controls in SQL before shell substitution can strip trailing newlines.
+  result="$(_orca_sql "
+    WITH target AS (
+      SELECT json_extract(value,'\$.tabId') AS tabid,
+             json_extract(value,'\$.worktreeId') AS wtid
+      FROM json_each('$esc','\$.result.terminals')
+      WHERE json_extract(value,'\$.handle')='$bare'
+    ), layouts AS (
+      SELECT value AS layout,tabid FROM target,json_each('$esc','\$.result.visualLayouts')
+      WHERE json_extract(value,'\$.worktreeId')=wtid
+    ), matches AS (
+      SELECT tree.value AS tab FROM layouts,json_tree(layout,'\$.root') AS tree
+      WHERE tree.type='object' AND tree.path LIKE '%.tabs'
+        AND CASE WHEN tree.type='object' THEN json_extract(tree.value,'\$.tabId') END=tabid
+    )
+    SELECT json_object('count',count(*),'title',json_extract(min(tab),'\$.title'),
+      'hascontrol',CASE WHEN instr(json_extract(min(tab),'\$.title'),char(0))>0
+        OR instr(json_extract(min(tab),'\$.title'),char(9))>0
+        OR instr(json_extract(min(tab),'\$.title'),char(10))>0
+        OR instr(json_extract(min(tab),'\$.title'),char(13))>0 THEN 1 ELSE 0 END)
+    FROM matches;" 2>/dev/null)" || return 10
+  count="$(_orca_json_field "$result" '$.count' integer)"
+  [ "$count" = 1 ] || return 10
+  hascontrol="$(_orca_json_field "$result" '$.hascontrol' integer)"
   [ "$hascontrol" = 0 ] || return 10
-  title="$(_orca_json_field "$json" "$titlepath" text)"
+  title="$(_orca_json_field "$result" '$.title' text)"
   [ -n "$title" ] || title="unknown:title_missing"
   printf 'n/a:no_activity_concept\t%s\tn/a:no_independent_key\tn/a:no_independent_title\n' "$title"
+}
+
+# Reuse the authoritative tab-title observation for the action hook's fast
+# path. Without this optional ABI hook every send repeats full seat discovery.
+terminal_label_of() {
+  local observation _activity label _rest
+  observation="$(terminal_team_observe "$1")" || return $?
+  IFS=$'\t' read -r _activity label _rest <<< "$observation"
+  case "$label" in ''|unknown:*|n/a:*) return 10 ;; esac
+  printf '%s\n' "$label"
 }

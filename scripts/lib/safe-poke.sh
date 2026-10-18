@@ -325,6 +325,7 @@ _agmsg_safe_poke_recover() {
   fi
 
   rc=0
+  printf 'pid=%s\nphase=submitting\n' "${BASHPID:-$$}" > "$_AGMSG_POKE_LOCK/owner" || return 1
   terminal_poke "$id" "$text" >/dev/null || rc=$?
   if [ "$rc" -ne 0 ]; then
     # The message never went in. Best effort: put the draft back, but --
@@ -384,7 +385,32 @@ _agmsg_safe_poke_recover() {
 # check for overall success/failure (`>/dev/null 2>&1`, `rc=$?` with no
 # branch on a specific code), so 15 is a drop-in there too; poke.sh is the
 # one caller that reports 14 and 15 differently to the operator.
-agmsg_safe_poke() {
+agmsg_safe_poke() (
+  # Lock the actual composer, including its safety reads. This also covers
+  # explicit poke and self-poke callers, not only send's automatic delivery.
+  umask 077
+  . "$_AGMSG_SAFE_POKE_LIB_DIR/hash.sh"
+  local key lock deadline=$((SECONDS + 15))
+  key="$(printf '%s\n%s' "${_AGMSG_TERMINAL_LOADED:-unknown}" "$1" | agmsg_sha1)" || return 1
+  lock="$SKILL_DIR/run/poke-pane.$key.lock"
+  mkdir -p "$SKILL_DIR/run" || return 1
+  while ! mkdir "$lock" 2>/dev/null; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "poke: composer busy or interrupted; inspect $lock/owner before recovery (no automatic replay)" >&2
+      return 75
+    fi
+    sleep 0.1
+  done
+  trap 'rm -f "$lock/owner"; rmdir "$lock" 2>/dev/null || true' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM HUP
+  printf 'pid=%s\nphase=checking\n' "${BASHPID:-$$}" > "$lock/owner" || return 1
+  _agmsg_safe_poke_unlocked "$lock" "$@"
+)
+
+_agmsg_safe_poke_unlocked() {
+  local _AGMSG_POKE_LOCK="$1"
+  shift
   local id="$1" text="$2" marker="$3" boxed="$4" team="$5" name="$6"
   shift 6
   local retries=0 retry_delay=2 backoff=exponential
@@ -491,6 +517,7 @@ agmsg_safe_poke() {
       fi
     fi
     if [ "$rc" -eq 0 ]; then
+      printf 'pid=%s\nphase=submitting\n' "${BASHPID:-$$}" > "$_AGMSG_POKE_LOCK/owner" || return 1
       terminal_poke "$id" "$text" >/dev/null || rc=$?
       return "$rc"
     fi

@@ -177,15 +177,16 @@ SH
   [[ "$(storage_list_unread poketeam receiver)" == *'refused'* ]]
 }
 
-@test "poke mode: concurrent or interrupted send lock refuses before storing another copy" {
+@test "poke mode: obsolete sender lock does not block the common composer lock" {
   configure_pair claude-code
+  fake_poke
   source "$SCRIPTS/lib/poke-mode.sh"
   local lock="$TEST_SKILL_DIR/run/poke-send.$(printf '%s\n%s' poketeam receiver | agmsg_sha1).lock"
   mkdir "$lock"
-  run bash "$SCRIPTS/send.sh" poketeam sender receiver duplicate
-  [ "$status" -ne 0 ]
-  [[ "$output" == *'another poke send is active'* ]]
+  run bash "$SCRIPTS/send.sh" poketeam sender receiver fresh
+  [ "$status" -eq 0 ]
   [ -d "$lock" ]
+  [ "$(cat "$CAPTURE")" = fresh ]
   [ -z "$(storage_list_unread poketeam receiver)" ]
 }
 

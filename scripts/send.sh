@@ -68,19 +68,24 @@ source "$SCRIPT_DIR/lib/type-registry.sh"
 # never bypass team-name path safety.
 agmsg_validate_team_name "$TEAM" || exit 1
 
-# A seat that sends names its own pane if it is not named (self-name.sh): the
-# 1.3.0 rule that every live seat's terminal id/name is right in any state,
-# tied to the action rather than to a CLI's boot path. Best-effort, never fails
-# the send; the common case is one file read.
-# shellcheck disable=SC1091
-source "$SCRIPT_DIR/lib/self-name.sh"
-agmsg_self_name_on_action "$TEAM" "$FROM"
-# And, once and early, fix its own CLI session name by typing /rename into its own
-# pane (self-rename.sh, #1081). Best-effort, never fails the send; opt out with
-# AGMSG_SELF_RENAME=off (or the whole family with AGMSG_SELF_NAME=off).
-# shellcheck disable=SC1091
-source "$SCRIPT_DIR/lib/self-rename.sh"
-agmsg_self_rename_on_action "$TEAM" "$FROM"
+# On Windows, transport must not wait for best-effort terminal discovery or
+# implicitly type /rename. Join/actas/fix own placement; explicit opt-in keeps
+# the legacy opportunistic behavior available.
+if [[ "${OSTYPE:-}" != msys* && "${OSTYPE:-}" != cygwin* ]] || [ "${AGMSG_SELF_NAME:-off}" != off ]; then
+  # A seat that sends names its own pane if it is not named (self-name.sh): the
+  # 1.3.0 rule that every live seat's terminal id/name is right in any state,
+  # tied to the action rather than to a CLI's boot path. Best-effort, never fails
+  # the send; the common case is one file read.
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/lib/self-name.sh"
+  agmsg_self_name_on_action "$TEAM" "$FROM"
+  # And, once and early, fix its own CLI session name by typing /rename into its own
+  # pane (self-rename.sh, #1081). Best-effort, never fails the send; opt out with
+  # AGMSG_SELF_RENAME=off (or the whole family with AGMSG_SELF_NAME=off).
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/lib/self-rename.sh"
+  agmsg_self_rename_on_action "$TEAM" "$FROM"
+fi
 
 agmsg_storage_load
 DB="$(agmsg_db_path "$TEAM")"
@@ -135,6 +140,7 @@ if [ "$FORCE" -ne 1 ]; then
 fi
 
 # Resolve the receiving registration, not this sender's type or project.
+# shellcheck disable=SC2034 # consumed by poke-mode.sh
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=lib/poke-mode.sh
 . "$SCRIPT_DIR/lib/poke-mode.sh"
@@ -143,14 +149,8 @@ POKE_RC=0
 agmsg_poke_target "$TEAM" "$TO" || POKE_RC=$?
 case "$POKE_RC" in 0) POKE_MODE=1 ;; 1) ;; *) exit 1 ;; esac
 if [ "$POKE_MODE" = 1 ]; then
-  # Serialize submissions to the same composer, including the safety check.
-  # A crashed sender leaves a visible lock; never silently steal one or retry
-  # a possibly submitted message (terminal submission has no transaction ACK).
-  mkdir -p "$SKILL_DIR/run"
-  POKE_LOCK="$SKILL_DIR/run/poke-send.$(printf '%s\n%s' "$TEAM" "$TO" | agmsg_sha1).lock"
-  mkdir "$POKE_LOCK" 2>/dev/null || die "another poke send is active (or interrupted): $POKE_LOCK; check the target before retrying"
   POKE_BODY=""
-  trap 'rm -f "${POKE_BODY:-}"; rmdir "$POKE_LOCK" 2>/dev/null || true' EXIT
+  trap 'rm -f "${POKE_BODY:-}"' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM HUP
 fi

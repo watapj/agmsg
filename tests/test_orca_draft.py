@@ -58,6 +58,24 @@ sqlite3() {
         result = self.read_draft(None)
         self.assertEqual(result.returncode, 12, result.stderr)
 
+    def test_action_label_hook_reuses_tab_observation_and_rejects_unknown(self):
+        code = r'''
+source scripts/drivers/terminals/orca/ops.sh
+terminal_team_observe() { printf 'activity\t%s\tkey\ttitle\n' "$TEST_LABEL"; }
+terminal_label_of term_11111111-1111-4111-8111-111111111111
+'''
+        for label in ["team:alice", "日本語:agent", "unknown:title_missing", "n/a:no_title"]:
+            with self.subTest(label=label):
+                result = subprocess.run([BASH, "-c", code], cwd=ROOT,
+                                        env=dict(os.environ, TEST_LABEL=label),
+                                        capture_output=True, timeout=20)
+                if label.startswith(("unknown:", "n/a:")):
+                    self.assertEqual(result.returncode, 10, result.stderr)
+                    self.assertEqual(result.stdout, b"")
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.decode("utf-8").strip(), label)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,38 @@ setup() {
 }
 teardown() { teardown_test_env; }
 
+@test "safe-poke: concurrent callers serialize the same composer" {
+  terminal_poke() {
+    mkdir "$POKE_LOG.active" || return 99
+    sleep 1
+    printf '%s\n' "$2" >> "$POKE_LOG"
+    rmdir "$POKE_LOG.active"
+  }
+  agmsg_safe_poke pane-1 first '' no team alice &
+  local first=$!
+  agmsg_safe_poke pane-1 second '' no other alias &
+  local second=$!
+  wait "$first"
+  wait "$second"
+  [ "$(wc -l < "$POKE_LOG" | tr -d '[:space:]')" -eq 2 ]
+  [ ! -d "$POKE_LOG.active" ]
+}
+
+@test "safe-poke: interrupted composer lock refuses without stealing or typing" {
+  source "$SKILL_DIR/scripts/lib/hash.sh"
+  local key lock
+  key="$(printf '%s\n%s' unknown pane-1 | agmsg_sha1)"
+  lock="$SKILL_DIR/run/poke-pane.$key.lock"
+  mkdir -p "$lock"
+  printf 'pid=123\nphase=submitting\n' > "$lock/owner"
+  sleep() { SECONDS=$((SECONDS + 15)); }
+  run agmsg_safe_poke pane-1 text '' no team alice
+  [ "$status" -eq 75 ]
+  [[ "$output" == *'no automatic replay'* ]]
+  [ -f "$lock/owner" ]
+  [ ! -s "$POKE_LOG" ]
+}
+
 @test "safe-poke: a driver-capable draft hook is checked first -- content refuses without polling the screen, empty-twice pokes, unknown (rc 10) stops without writing (#1443 continuation)" {
   # (a) A real draft on the FIRST read refuses immediately (rc 14) and never
   # calls terminal_poke or any screen-reading function -- the whole point of

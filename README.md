@@ -334,6 +334,13 @@ $agmsg                          — or /skills → agmsg
 
 Codex supports `mode monitor` through an app-server bridge, plus `mode turn`, `mode off`, and `mode poke`.
 
+Claude Code's monitor renews even after an idle 1750-second run. The model
+must re-arm the generic Monitor when its renewal event arrives; this is not an
+OS background service. Set `AGMSG_CC_MONITOR_KEEP_ALIVE=off` explicitly to stop
+a quiet watcher at that boundary. Read-receipt failures stop the stream with
+message IDs instead of silently emitting the same messages again; inspect
+history before re-arming.
+
 ### Direct delivery with poke (Codex and Claude Code)
 
 In each receiving project, select `$agmsg mode poke` in Codex or
@@ -366,6 +373,11 @@ For an already displayed suggestion, turn off Prompt suggestions in `/config`
 or restart the session if the setting does not clear it automatically.
 Other delivery modes leave this preference as it is; remove the project
 override or set it to `true` explicitly to restore suggestions.
+On Windows, ordinary `send`, `inbox` and `history` no longer perform terminal
+discovery or type `/rename` before transporting messages. Establish placement
+with `join`/`actas`, or repair it from the affected session with `agmsg fix`.
+Set `AGMSG_SELF_NAME=on` explicitly to opt into the former per-action naming
+behavior. Linux/macOS retain their existing defaults.
 Codex's TUI and app-server remain alive. In each already running Claude session,
 follow the printed directive to TaskStop its **known** agmsg Monitor task; do
 not invent task IDs. Finish the current turn when waiting, without polling
@@ -375,10 +387,20 @@ must reload the updated skill. Explicit inbox/history commands remain available.
 Draft protection and terminal errors return failure. A failed submission stays
 unread and prints its message ID; partial submission is possible, so check the
 target and `agmsg history --id <id>` before recovery. There is no automatic
-retry or fallback to monitor. Concurrent sends to one recipient are refused
-while its submission lock is held. If a sender crashes, verify no submission
-is still running and inspect the target before removing the reported empty
-`run/poke-send.<hash>.lock` directory; do not automatically resend.
+retry or fallback to monitor. Automatic and explicit pokes share a lock on the
+actual terminal composer, including draft checks. A concurrent caller waits up
+to 15 seconds; on timeout its saved message stays unread and its ID is reported.
+An interrupted call can leave `run/poke-pane.<hash>.lock/owner`, with its PID and
+phase. Verify that the owner has exited and inspect the target and message
+history before removing that file and its lock directory. Never remove a live
+lock or automatically replay an uncertain submission. Obsolete `poke-send`
+locks are no longer used; finish old send processes before updating.
+
+If an upgraded installation reports both an ID-keyed and a legacy placement,
+run `scripts/placement-dedup.sh <team> <name>`. It archives the legacy record only
+when both files are byte-identical, keeping a backup under `run/placement-duplicate.*`.
+Different records remain refused; the affected session must repair its own
+placement with `agmsg fix`.
 
 To update, install the updated scripts and rendered skills together. To disable
 poke, select `agmsg mode off`; queued messages remain available through inbox.

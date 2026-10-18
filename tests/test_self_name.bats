@@ -24,6 +24,7 @@
 setup() {
   load 'test_helper'
   setup_test_env
+  export AGMSG_SELF_NAME=on # Explicitly exercise legacy opportunistic action naming.
   export SKILL_DIR="$TEST_SKILL_DIR"
   export RUN_DIR="$SKILL_DIR/run"
   mkdir -p "$RUN_DIR"

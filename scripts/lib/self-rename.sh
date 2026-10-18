@@ -154,6 +154,20 @@ agmsg_self_rename_on_action() {
   qualified_ref="$(agmsg_terminal_ref_qualify "$ref")" || return 0
   ref="$qualified_ref"
 
+  # The mark: what did this seat already do at THIS pane+generation?
+  local have hr he hres phase=first
+  have="$(agmsg_role_session_renamed "$team" "$agent")"
+  if [ -n "$have" ]; then
+    hr="${have%%	*}"; have="${have#*	}"; he="${have%%	*}"; hres="${have#*	}"
+    if [ "$hr" = "$ref" ] && [ "$he" = "$epoch" ]; then
+      case "$hres" in
+        attempted) phase=confirm ;;   # poked last time; confirm now, do not re-poke
+        *) return 0 ;;                # ok / failed / poked_unverified / skipped: done
+      esac
+    fi
+    # a mark for a DIFFERENT pane/generation is stale: treat as first, below.
+  fi
+
   # PLACEMENT GUARD (#1112, same rule as terminal-registry.sh's #1114 guard on
   # the naming/marking/record path -- this is the SECOND call site that turns
   # the raw environment into a pane, and it was unguarded). A codex seat
@@ -182,20 +196,6 @@ agmsg_self_rename_on_action() {
     if [ "$_claim_rc" -ne 0 ] || [ -n "$_claimed_by" ]; then
       return 0
     fi
-  fi
-
-  # The mark: what did this seat already do at THIS pane+generation?
-  local have hr he hres phase=first
-  have="$(agmsg_role_session_renamed "$team" "$agent")"
-  if [ -n "$have" ]; then
-    hr="${have%%	*}"; have="${have#*	}"; he="${have%%	*}"; hres="${have#*	}"
-    if [ "$hr" = "$ref" ] && [ "$he" = "$epoch" ]; then
-      case "$hres" in
-        attempted) phase=confirm ;;   # poked last time; confirm now, do not re-poke
-        *) return 0 ;;                # ok / failed / poked_unverified / skipped: done
-      esac
-    fi
-    # a mark for a DIFFERENT pane/generation is stale: treat as first, below.
   fi
 
   # Opt-out, recorded VISIBLY (only relevant when we would otherwise act now).

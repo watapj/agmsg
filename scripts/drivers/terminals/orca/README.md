@@ -11,6 +11,12 @@ this pane by (measured directly against real orca instances).
 When both herdr and orca could claim the same environment, orca's lower
 manifest `priority` means its own env var wins.
 
+Tab-label observation matches the exact worktree and tab ID recursively inside
+`visualLayouts[].root`, including split tab groups. Duplicate tab matches and
+titles containing NUL, tab, CR or LF are refused. The optional
+`terminal_label_of` hook reuses that observation for action naming; terminal
+JSON is passed to SQLite over stdin to avoid native Windows argument limits.
+
 ## peek exit codes
 
 orca's own `terminal_peek` returns exactly two failure codes: **10** = orca is

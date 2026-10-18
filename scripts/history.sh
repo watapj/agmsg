@@ -25,17 +25,22 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/storage.sh"
 agmsg_storage_load
 
-# A seat that reads history as itself names its own pane if it is not named
-# (self-name.sh); see send.sh. Only when an agent is given: without one this
-# is a team-wide read by nobody in particular.
-if [ -n "$AGENT" ]; then
-  # shellcheck disable=SC1091
-  source "$SCRIPT_DIR/lib/self-name.sh"
-  agmsg_self_name_on_action "$TEAM" "$AGENT"
-  # Fix its own CLI session name once, early (self-rename.sh, #1081). Best-effort.
-  # shellcheck disable=SC1091
-  source "$SCRIPT_DIR/lib/self-rename.sh"
-  agmsg_self_rename_on_action "$TEAM" "$AGENT"
+# On Windows, transport must not wait for best-effort terminal discovery or
+# implicitly type /rename. Join/actas/fix own placement; explicit opt-in keeps
+# the legacy opportunistic behavior available.
+if [[ "${OSTYPE:-}" != msys* && "${OSTYPE:-}" != cygwin* ]] || [ "${AGMSG_SELF_NAME:-off}" != off ]; then
+  # A seat that reads history as itself names its own pane if it is not named
+  # (self-name.sh); see send.sh. Only when an agent is given: without one this
+  # is a team-wide read by nobody in particular.
+  if [ -n "$AGENT" ]; then
+    # shellcheck disable=SC1091
+    source "$SCRIPT_DIR/lib/self-name.sh"
+    agmsg_self_name_on_action "$TEAM" "$AGENT"
+    # Fix its own CLI session name once, early (self-rename.sh, #1081). Best-effort.
+    # shellcheck disable=SC1091
+    source "$SCRIPT_DIR/lib/self-rename.sh"
+    agmsg_self_rename_on_action "$TEAM" "$AGENT"
+  fi
 fi
 
 # A history read must not create a store, so a team that has never been written
