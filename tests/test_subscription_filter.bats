@@ -70,6 +70,9 @@ EOF
   cat > "$SKILL_DIR/scripts/lib/resolve-project.sh" <<'EOF'
 agmsg_canonical_path() { printf '%s\n' "$1"; }
 EOF
+  cat > "$SKILL_DIR/scripts/lib/poke-mode.sh" <<'EOF'
+agmsg_poke_mode_path() { printf '%s/poke-mode' "$SKILL_DIR"; }
+EOF
 }
 
 @test "eligible pairs checks the exact current thread after ownership resolution" {
@@ -91,4 +94,54 @@ EOF
   run bash "$SKILL_DIR/scripts/drivers/types/codex/eligible-pairs.sh" /project codex --pair $'team\tbob' --thread current-thread
   [ "$status" -eq 75 ]
   [[ "$output" == *'does not own the requested subscription'* ]]
+}
+
+@test "eligible pairs refuses delivery after switching to poke mode" {
+  eligible_fixture
+  touch "$SKILL_DIR/poke-mode"
+  run bash "$SKILL_DIR/scripts/drivers/types/codex/eligible-pairs.sh" /project codex --pair $'team\talice' --thread current-thread
+  [ "$status" -eq 75 ]
+  [[ "$output" == *'monitor is disabled'* ]]
+}
+
+role_fixture() {
+  mkdir -p "$SKILL_DIR/run"
+  _actas_lock_encode() { printf '%s' "$1"; }
+  _actas_lock_dir() { printf '%s/run' "$SKILL_DIR"; }
+  source "$BATS_TEST_DIRNAME/../scripts/lib/role-session.sh"
+  printf 'type=codex\nsession=current\nproject=/project\nteam=team\nagent=alice' > "$SKILL_DIR/run/role-session.target"
+  # A field getter must not be spawned on this hot path.
+  _agmsg_role_session_field() { return 99; }
+}
+
+@test "role lookup reads one exact record without field subprocesses" {
+  role_fixture
+  printf 'type=claude-code\nsession=current\nproject=/project\nteam=team\nagent=bob\n' > "$SKILL_DIR/run/role-session.other"
+  run agmsg_role_session_match_unique codex /project current
+  [ "$status" -eq 0 ]
+  [ "$output" = $'team\talice' ]
+  run agmsg_role_session_match_unique codex /other current
+  [ "$status" -eq 1 ]
+  run agmsg_role_session_match_unique codex /project replaced
+  [ "$status" -eq 1 ]
+}
+
+@test "role lookup refuses ambiguous matching records" {
+  role_fixture
+  cp "$SKILL_DIR/run/role-session.target" "$SKILL_DIR/run/role-session.duplicate"
+  run agmsg_role_session_match_unique codex /project current
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+}
+
+@test "role lookup preserves first fields including empty values" {
+  role_fixture
+  printf '\ntype=claude-code\nsession=other\nproject=/other\nteam=wrong\nagent=wrong\n' >> "$SKILL_DIR/run/role-session.target"
+  run agmsg_role_session_match_unique codex /project current
+  [ "$status" -eq 0 ]
+  [ "$output" = $'team\talice' ]
+  printf 'type=\ntype=codex\nsession=current\nproject=/project\nteam=team\nagent=alice\n' > "$SKILL_DIR/run/role-session.target"
+  run agmsg_role_session_match_unique codex /project current
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
 }

@@ -402,23 +402,37 @@ agmsg_role_session_lookup_by_sid() {
 # thread to is worse than not handing it to one, so an ambiguous or absent
 # answer is silence, never a pick among candidates (#1401).
 agmsg_role_session_match_unique() {
-  local type="$1" project_physical="$2" sid="$3" dir f t p v team agent match=""
+  local type="$1" project_physical="$2" sid="$3" dir f t p v team agent line key seen match=""
   [ -n "$type" ] && [ -n "$project_physical" ] && [ -n "$sid" ] || return 1
   dir="$(_actas_lock_dir)"
   [ -d "$dir" ] || return 1
   for f in "$dir"/role-session.*; do
     [ -f "$f" ] || continue
-    t="$(_agmsg_role_session_field "$f" type)"
+    # Read each record once, without forking per field. First occurrence wins,
+    # including an empty value, just as in _agmsg_role_session_field.
+    t=""; v=""; p=""; team=""; agent=""; seen="|"
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        type=*|session=*|project=*|team=*|agent=*)
+          key=${line%%=*}
+          case "$seen" in *"|$key|"*) continue ;; esac
+          seen="$seen$key|"
+          case "$key" in
+            type) t=${line#*=} ;;
+            session) v=${line#*=} ;;
+            project) p=${line#*=} ;;
+            team) team=${line#*=} ;;
+            agent) agent=${line#*=} ;;
+          esac
+          ;;
+      esac
+    done < "$f" 2>/dev/null || continue
     [ "$t" = "$type" ] || continue
-    v="$(_agmsg_role_session_field "$f" session)"
     [ "$v" = "$sid" ] || continue
-    p="$(_agmsg_role_session_field "$f" project)"
     [ "$p" = "$project_physical" ] || continue
     # A second qualifying record makes the answer ambiguous; give up rather
     # than pick the first one found (readdir order is not meaningful).
     [ -n "$match" ] && return 1
-    team="$(_agmsg_role_session_field "$f" team)"
-    agent="$(_agmsg_role_session_field "$f" agent)"
     [ -n "$team" ] && [ -n "$agent" ] || continue
     match="$team"$'\t'"$agent"
   done

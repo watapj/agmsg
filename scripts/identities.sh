@@ -15,7 +15,8 @@ set -euo pipefail
 
 PROJECT_PATH="${1:?Usage: identities.sh <project_path> <agent_type>}"
 AGENT_TYPE="${2:?Missing agent_type}"
-AGENT_TYPE_SQL=$(printf '%s' "$AGENT_TYPE" | sed "s/'/''/g")
+quote="'"
+AGENT_TYPE_SQL=${AGENT_TYPE//"$quote"/"$quote$quote"}
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"  # resolve-project.sh requires SKILL_DIR
@@ -31,20 +32,13 @@ PROJECT_SQL_IN=$(agmsg_project_sql_in_list "$PROJECT_PATH")
 for config_file in "$TEAMS_DIR"/*/config.json; do
   [ -f "$config_file" ] || continue
   cfg_sql=$(agmsg_sql_readfile_path "$config_file")
-  TEAM_NAME=$(agmsg_sqlite_mem "
-    WITH raw(json) AS (SELECT CAST(readfile('$cfg_sql') AS TEXT)),
-    cfg(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw)
-    SELECT json_extract(json, '\$.name') FROM cfg;
-  ")
-  [ -z "$TEAM_NAME" ] && continue
-  [ "$TEAM_NAME" = "null" ] && continue
-  TEAM_SQL=$(printf '%s' "$TEAM_NAME" | sed "s/'/''/g")
-
+  # Read the team name and registrations together; each process costs on MSYS.
   sqlite3 -separator $'\t' :memory: "
     WITH raw(json) AS (SELECT CAST(readfile('$cfg_sql') AS TEXT)),
     cfg(json) AS (SELECT CASE WHEN json_valid(json) THEN json END FROM raw),
     agents AS (
       SELECT
+        json_extract(cfg.json, '\$.name') AS team,
         key AS name,
         CASE
           WHEN json_type(json_extract(value, '\$.registrations')) = 'array' THEN json_extract(value, '\$.registrations')
@@ -52,9 +46,10 @@ for config_file in "$TEAMS_DIR"/*/config.json; do
         END AS registrations
       FROM cfg, json_each(json_extract(cfg.json, '\$.agents'))
     )
-    SELECT DISTINCT '$TEAM_SQL' AS team, name
+    SELECT DISTINCT team, name
     FROM agents, json_each(agents.registrations) AS r
-    WHERE json_extract(r.value, '\$.project') IN ($PROJECT_SQL_IN)
+    WHERE team IS NOT NULL AND team NOT IN ('', 'null')
+      AND json_extract(r.value, '\$.project') IN ($PROJECT_SQL_IN)
       AND json_extract(r.value, '\$.type') = '$AGENT_TYPE_SQL'
     ORDER BY team, name;
   " | tr -d '\r'

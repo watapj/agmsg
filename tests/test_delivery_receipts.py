@@ -224,7 +224,7 @@ await b.tryStartTurn();assert.equal(b.deliveryRetryCount,4);assert.equal(starts,
 
     def test_current_thread_binding_is_checked_again_after_snapshot(self):
         self.run_js("""
-b.opts.attachCurrent=true;b.checkCurrentThread=async()=>{};
+b.opts.attachCurrent=true;b.verifyThreadOnServer=async()=>{};
 const helper=b.runInboxHelper.bind(b);let checks=0;
 b.runInboxHelper=async args=>{
  if(args[0].endsWith('eligible-pairs.sh')){
@@ -237,6 +237,46 @@ await b.tryStartTurn();
 clearTimeout(b.deliveryRetryTimer);b.deliveryRetryTimer=null;
 assert.equal(checks,2);assert.equal(starts,0);assert.equal(acks.length,0);
 assert(b.deliveryPaused);assert(!fs.existsSync(b.deliveryFile));
+""")
+
+    def test_inline_delivery_keeps_fresh_checks_without_duplicate_role_probe(self):
+        self.run_js("""
+b.opts.attachCurrent=true;b.monitorInitialized=true;b.roleCheckError='old failure';
+let serverChecks=0,roleChecks=0;
+b.verifyThreadOnServer=async()=>{serverChecks++;};
+b.checkCurrentThread=async()=>{throw new Error('redundant role probe');};
+const helper=b.runInboxHelper.bind(b);
+b.runInboxHelper=async args=>{
+ if(args[0].endsWith('eligible-pairs.sh')){
+  assert.equal(args[args.indexOf('--thread')+1],'thread');roleChecks++;
+ }
+ return helper(args);
+};
+await b.tryStartTurn();
+assert.equal(serverChecks,1);assert.equal(roleChecks,3);
+assert.equal(starts,1);assert.equal(acks.length,1);assert.equal(b.roleCheckError,'');
+""")
+
+    def test_inline_delivery_refuses_wrong_server_before_reading_inbox(self):
+        self.run_js("""
+b.opts.attachCurrent=true;
+b.verifyThreadOnServer=async()=>{throw new Error('wrong server');};
+b.runInboxHelper=async()=>{throw new Error('must not read inbox');};
+await assert.rejects(b.tryStartTurn(),/wrong server/);
+assert.equal(starts,0);assert.equal(acks.length,0);
+""")
+
+    def test_inline_delivery_waits_for_existing_probe_without_another_probe(self):
+        self.run_js("""
+b.opts.attachCurrent=true;
+let finish;
+b.currentCheck=new Promise(resolve=>{finish=resolve;});
+b.verifyThreadOnServer=async()=>{throw new Error('duplicate server probe');};
+const pending=b.tryStartTurn();
+await new Promise(resolve=>setTimeout(resolve,10));
+assert.equal(starts,0);assert.equal(acks.length,0);
+finish();await pending;
+assert.equal(starts,1);assert.equal(acks.length,1);
 """)
 
     def test_ack_helper_failure_never_schedules_a_new_turn(self):

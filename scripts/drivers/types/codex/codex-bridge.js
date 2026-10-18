@@ -1132,7 +1132,7 @@ class CodexBridge {
     try { return await this.currentCheck; } finally { this.currentCheck = null; }
   }
 
-  async verifyCurrentThread() {
+  async verifyThreadOnServer() {
     const loaded = await this.client.request("thread/loaded/list", {});
     if (!Array.isArray(loaded.data) || !loaded.data.includes(this.threadId)) {
       throw new Error("current thread is not loaded on this server; embedded/--no-daemon sessions cannot attach");
@@ -1142,6 +1142,10 @@ class CodexBridge {
     if (!cwd || fs.realpathSync(cwd).toLowerCase() !== fs.realpathSync(this.opts.project).toLowerCase()) {
       throw new Error("current thread project does not match the requested project");
     }
+  }
+
+  async verifyCurrentThread() {
+    await this.verifyThreadOnServer();
     // Slow MSYS startup must not block control-pipe stop/status requests.
     const roleStartedAt = Date.now();
     const role = await new Promise((resolve, reject) => {
@@ -1712,7 +1716,18 @@ class CodexBridge {
       if (this.attachTurnCheck) return;
       this.attachTurnCheck = true;
       this.setDeliveryPhase("checking-session");
-      try { await this.checkCurrentThread(); } finally { this.attachTurnCheck = false; }
+      try {
+        // Inline delivery checks the exact role/thread before and after its
+        // snapshot via eligibleInboxPairs. Do not run the same slow shell
+        // registration probe a third time before those checks.
+        if (this.opts.inlineInbox) {
+          // Let an already-running periodic probe finish instead of competing
+          // with its MSYS children during inbox preparation.
+          if (this.currentCheck) await this.currentCheck;
+          else await this.verifyThreadOnServer();
+        }
+        else await this.checkCurrentThread();
+      } finally { this.attachTurnCheck = false; }
       if (this.stopping || !this.pendingWake || this.turnActive || !this.threadIdle) return;
     }
     if (this.opts.inlineInbox) {
@@ -1796,6 +1811,7 @@ class CodexBridge {
     this.deliveryPaused = false;
     this.deliveryRetryExhausted = false;
     this.deliveryError = "";
+    this.roleCheckError = "";
     this.deliveryRetryCount = 0;
     if (this.monitorInitialized) this.monitorReady = true;
   }

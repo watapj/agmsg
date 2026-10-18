@@ -119,3 +119,24 @@ assert_identity_for() {
   project="$(sqlite_mem "SELECT json_extract(readfile('$(rf "$cfg")'), '\$.agents.alice.registrations[0].project');")"
   [ "$project" = "C:/x" ]
 }
+
+@test "identities: quoted team names and duplicate registrations stay exact" {
+  mkdir -p "$TEST_SKILL_DIR/teams/team"
+  cat > "$TEST_SKILL_DIR/teams/team/config.json" <<'EOF'
+{"name":"team 'quoted","agents":{"alice":{"registrations":[{"type":"codex","project":"C:/x"},{"type":"codex","project":"C:/x"}]},"bob":{"type":"claude-code","project":"C:/x"}}}
+EOF
+  run bash "$SCRIPTS/identities.sh" /c/x codex
+  [ "$status" -eq 0 ]
+  [ "$output" = "team 'quoted"$'\talice' ]
+}
+
+@test "identities: absent empty and null team names yield no pairs" {
+  mkdir -p "$TEST_SKILL_DIR/teams/team"
+  local field
+  for field in '' '"name":null,' '"name":"",' '"name":"null",'; do
+    printf '{%s"agents":{"alice":{"type":"codex","project":"C:/x"}}}\n' "$field" > "$TEST_SKILL_DIR/teams/team/config.json"
+    run bash "$SCRIPTS/identities.sh" /c/x codex
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+  done
+}

@@ -29,7 +29,12 @@ pairs="$(agmsg_subscription_pairs "$PROJECT" "$TYPE" "$owner_id" "" "" "$request
 if [ -n "$thread" ]; then
   source "$SCRIPT_DIR/../../../lib/role-session.sh"
   source "$SCRIPT_DIR/../../../lib/resolve-project.sh"
+  source "$SCRIPT_DIR/../../../lib/poke-mode.sh"
   project_physical="$(agmsg_canonical_path "$PROJECT")"
+  if [ -f "$(agmsg_poke_mode_path "$TYPE" "$project_physical")" ]; then
+    echo 'eligible-pairs: monitor is disabled while poke mode is selected' >&2
+    exit 75
+  fi
   current="$(agmsg_role_session_match_unique "$TYPE" "$project_physical" "$thread")" || {
     echo 'eligible-pairs: cannot confirm a unique role for this thread' >&2; exit 75;
   }
