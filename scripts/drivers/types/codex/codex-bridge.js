@@ -1052,19 +1052,17 @@ class CodexBridge {
 
   async run() {
     fs.mkdirSync(RUN_DIR, { recursive: true });
-    if (process.platform === "win32") {
+    this.ensureSingleInstance();
+    {
       const control = require("./monitor-control");
       this.controlServer = await control.listen(
         control.address(SKILL_DIR, this.opts.project, this.identities),
         () => ({ ready: !!this.monitorReady, attached: !!this.opts.attachCurrent,
           thread: this.threadId, appServer: this.opts.appServer, pid: process.pid }),
-        async () => {
-          await this.shutdown();
-          setTimeout(() => process.exit(0), 100).unref();
-        },
+        () => this.shutdown(),
+        () => process.exit(0),
       );
     }
-    this.ensureSingleInstance();
     this.writeMeta();
     this.installSignals();
     // Any thread-scoped app-server activity for OUR active turn re-arms the
@@ -1079,27 +1077,7 @@ class CodexBridge {
     this.client.on("error", this.clientHandler("error", (params) => this.onServerError(params)));
     this.client.on("item/agentMessage/delta", this.clientHandler("item/agentMessage/delta", (params) => this.onAgentMessageDelta(params)));
     this.client.on("thread/status/changed", this.clientHandler("thread/status/changed", (params) => this.onThreadStatus(params)));
-    this.client.on("turn/started", this.clientHandler("turn/started", (params) => {
-      // The app-server holds threads beyond ours; another thread's turn must
-      // not flip our state (and, below, must not be mistaken for the turn we
-      // are starting).
-      if (params && params.threadId && params.threadId !== this.threadId) return;
-      // The app-server may notify the turn tryStartTurn() is starting BEFORE
-      // it ACKs the turn/start request. Capture its IDENTITY: only an end
-      // signal carrying this same turn id may be attributed to the new turn
-      // while the request is in flight (see onTurnCompleted).
-      if (this.startInFlight) {
-        this.inFlightTurnId = (params && params.turn && params.turn.id) || null;
-      }
-      this.turnActive = true;
-      this.threadIdle = false;
-      // This turn was not started by tryStartTurn() -- e.g. a TUI-driven turn
-      // on a thread the bridge shares -- so nothing else will arm a watchdog
-      // for it. Without one, a turn that never reports completion (the app
-      // -server does not reliably send turn/completed, see #41) leaves
-      // turnActive stuck true and every later wake deferred forever. See #299.
-      this.startTurnWatchdog();
-    }));
+    this.client.on("turn/started", this.clientHandler("turn/started", (params) => this.onTurnStarted(params)));
     this.client.on("turn/completed", this.clientHandler("turn/completed", (params) => this.onTurnCompleted(params)));
     this.client.on("turn/failed", this.clientHandler("turn/failed", (params) => this.onTurnCompleted(params)));
 
@@ -1217,6 +1195,7 @@ class CodexBridge {
 
   clientHandler(method, handler) {
     return (params) => {
+      if (this.stopping) return;
       try {
         Promise.resolve(handler(params)).catch((error) => this.failClientHandler(method, error));
       } catch (error) {
@@ -1226,6 +1205,7 @@ class CodexBridge {
   }
 
   failClientHandler(method, error) {
+    if (this.stopping) return;
     console.error(`codex-bridge: ${method} handler failed: ${error.message}`);
     this.shutdown().finally(() => process.exit(1));
   }
@@ -1408,7 +1388,7 @@ class CodexBridge {
         return ids[0];
       }
       if (Date.now() >= deadline) {
-        die("no loaded codex thread found via thread/loaded/list");
+        throw new Error("no loaded codex thread found via thread/loaded/list");
       }
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
@@ -1454,7 +1434,7 @@ class CodexBridge {
         // the condition, and a rewording that kept the code would not be this.
         // Exit non-zero so a bridge that cannot own its thread does not linger.
         if (/already has an active writer/iu.test(err && err.message ? err.message : "")) {
-          die(`thread/resume failed: ${err.message}`);
+          throw new Error(`thread/resume failed: ${err.message}`);
         }
         console.error(`codex-bridge: thread/resume failed (${err.message}); proceeding without resume`);
         this.threadIdle = true;
@@ -1462,7 +1442,7 @@ class CodexBridge {
         return;
       }
       if (!response.thread || response.thread.id !== this.threadId) {
-        die("thread/resume did not return the requested thread id");
+        throw new Error("thread/resume did not return the requested thread id");
       }
       const type = response.thread.status && response.thread.status.type;
       this.threadIdle = type !== "active";
@@ -1481,7 +1461,7 @@ class CodexBridge {
       ephemeral: false,
     });
     this.threadId = response.thread && response.thread.id;
-    if (!this.threadId) die("thread/start did not return a thread id");
+    if (!this.threadId) throw new Error("thread/start did not return a thread id");
     console.error(`codex-bridge: started thread ${this.threadId}`);
   }
 
@@ -1617,6 +1597,19 @@ class CodexBridge {
     }
   }
 
+  onTurnStarted(params = {}) {
+    if (params.threadId && params.threadId !== this.threadId) return;
+    // Preserve the requested turn's identity even if a later TUI turn starts
+    // before the RPC reply arrives. Its deferred completion cannot end the TUI turn.
+    const id = params.turn?.id || null;
+    if (this.startInFlight && !this.inFlightTurnId) this.inFlightTurnId = id;
+    this.activeTurnId = id;
+    this.turnActive = true;
+    this.threadIdle = false;
+    // TUI turns need the same idle watchdog as bridge-originated turns (#299).
+    this.startTurnWatchdog();
+  }
+
   async onTurnCompleted(params = {}) {
     if (params.threadId && params.threadId !== this.threadId) return;
     if (params.turn && params.turn.error) {
@@ -1639,6 +1632,7 @@ class CodexBridge {
       }
       return;
     }
+    if (params.turn?.id && this.activeTurnId && params.turn.id !== this.activeTurnId) return;
     await this.onTurnEnded();
   }
 
@@ -1662,6 +1656,10 @@ class CodexBridge {
     this.clearTurnWatchdog();
     this.turnActive = false;
     this.threadIdle = true;
+    this.activeTurnId = null;
+    // Receipt ACKs can outlast this turn. Track its end immediately, but wait
+    // for the delivery operation to release its guard before re-arming.
+    if (this.deliveryInFlight) { this.resumeAfterDelivery = true; return; }
     if (this.opts.maxWakes && this.wakeCount >= this.opts.maxWakes) {
       await this.shutdown();
       process.exit(0);
@@ -1686,6 +1684,10 @@ class CodexBridge {
     if (this.deliveryInFlight || this.stopping) return;
     this.deliveryInFlight = true;
     try { await this.startDeliveryTurn(); } finally { this.deliveryInFlight = false; }
+    if (this.resumeAfterDelivery) {
+      this.resumeAfterDelivery = false;
+      if (!this.turnActive && !this.stopping) await this.onTurnEnded();
+    }
   }
 
   async startDeliveryTurn() {
@@ -1733,6 +1735,11 @@ class CodexBridge {
         cwd: this.opts.project,
         runtimeWorkspaceRoots: this.opts.workspaceRoots,
       });
+      this.startInFlight = false;
+      if (this.inFlightTurnEnded) {
+        this.inFlightTurnEnded = false;
+        if (!this.activeTurnId || this.activeTurnId === this.inFlightTurnId) await this.onTurnEnded();
+      }
       if (this.opts.inlineInbox) {
         this.writeDelivery("accepted");
         await this.ackDelivery();
@@ -1741,7 +1748,7 @@ class CodexBridge {
       // Bound how long we treat the turn as active. The real app-server may
       // never send turn/completed; the watchdog (and thread/status idle) drive
       // onTurnEnded so detection re-arms instead of sleeping forever. See #41.
-      this.startTurnWatchdog();
+      if (this.turnActive) this.startTurnWatchdog();
     } catch (error) {
       this.pendingWake = true;
       this.turnActive = false;
@@ -1751,12 +1758,6 @@ class CodexBridge {
       throw error;
     } finally {
       this.startInFlight = false;
-    }
-    // A fast turn can be fully notified (started AND ended) before the ACK
-    // arrived; its deferred end is processed now that the start is settled.
-    if (this.inFlightTurnEnded) {
-      this.inFlightTurnEnded = false;
-      await this.onTurnEnded();
     }
   }
 
@@ -2008,7 +2009,6 @@ class CodexBridge {
     if (existing === process.pid) return;
     try {
       process.kill(existing, 0);
-      die(`bridge already running for ${this.identity.team}/${this.identity.name} (pid ${existing})`);
     } catch (error) {
       if (error && error.code === "ESRCH") {
         for (const file of [this.pidfile, this.metafile]) {
@@ -2020,8 +2020,9 @@ class CodexBridge {
         }
         return;
       }
-      die(`cannot verify existing bridge pid ${existing}: ${error.message}`);
+      throw new Error(`cannot verify existing bridge pid ${existing}: ${error.message}`);
     }
+    throw new Error(`bridge already running for ${this.identity.team}/${this.identity.name} (pid ${existing})`);
   }
 
   isStaleWake(maxId) {
@@ -2173,7 +2174,10 @@ async function main() {
   }
 
   const bridge = new CodexBridge(opts, identities);
-  await bridge.run();
+  try { await bridge.run(); } catch (error) {
+    await bridge.shutdown();
+    throw error;
+  }
 }
 
 if (require.main === module) {

@@ -143,6 +143,10 @@ function handle(line){
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("receiving:", result.stdout)
         self.assertIn("active writer", self.bridge_log())
+        self.assertFalse((self.skill / "run/codex-bridge.team.alice.pid").exists())
+        # A rejected startup must release its control endpoint, so retrying with
+        # a valid server can arm the same role without manual lock removal.
+        self.assertIn("receiving:", self.run_bridge("--activate-current").stdout)
 
     def test_another_thread_cannot_reuse_the_same_role(self):
         self.run_bridge("--activate-current")

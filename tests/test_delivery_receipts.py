@@ -100,6 +100,86 @@ await assert.rejects(b.resumeDelivery(),/identity mismatch/);
 assert.equal(acks.length,0);
 """)
 
+    def test_user_turn_during_ack_is_kept_active(self):
+        self.run_js("""
+let rearmed=0;
+b.armWatch=async()=>{rearmed++;};
+b.client.request=async()=>{starts++;b.onTurnStarted({threadId:'thread',turn:{id:'delivery'}});};
+const helper=b.runInboxHelper.bind(b);
+b.runInboxHelper=async args=>{
+  if(args.includes('--ack')){
+    assert.equal(b.startInFlight,false);
+    await b.onTurnCompleted({threadId:'thread',turn:{id:'delivery'}});
+    b.onTurnStarted({threadId:'thread',turn:{id:'user'}});
+  }
+  return helper(args);
+};
+await b.tryStartTurn();
+assert.equal(b.activeTurnId,'user');assert(b.turnActive);assert(!b.threadIdle);
+assert.equal(rearmed,0);assert.equal(acks.length,1);
+await b.onTurnCompleted({threadId:'thread',turn:{id:'delivery'}});
+assert(b.turnActive);assert.equal(rearmed,0);
+""")
+
+    def test_deferred_end_before_rpc_reply_cannot_end_later_user_turn(self):
+        self.run_js("""
+b.client.request=async()=>{
+  starts++;b.onTurnStarted({threadId:'thread',turn:{id:'delivery'}});
+  await b.onTurnCompleted({threadId:'thread',turn:{id:'delivery'}});
+  b.onTurnStarted({threadId:'thread',turn:{id:'user'}});
+};
+await b.tryStartTurn();
+assert.equal(b.inFlightTurnId,'delivery');assert.equal(b.activeTurnId,'user');
+assert(b.turnActive);assert(!b.threadIdle);assert.equal(acks.length,1);
+""")
+
+    def test_turn_ending_during_ack_rearms_only_after_ack(self):
+        self.run_js("""
+let rearmed=0;
+b.armWatch=async()=>{assert.equal(acks.length,1);assert(!b.deliveryInFlight);rearmed++;};
+b.client.request=async()=>{starts++;b.onTurnStarted({threadId:'thread',turn:{id:'delivery'}});};
+const helper=b.runInboxHelper.bind(b);
+b.runInboxHelper=async args=>{
+  if(args.includes('--ack')){
+    await b.onTurnCompleted({threadId:'thread',turn:{id:'delivery'}});
+    assert.equal(rearmed,0);
+  }
+  return helper(args);
+};
+await b.tryStartTurn();assert.equal(rearmed,1);assert(b.threadIdle);
+""")
+
+    def test_pending_wake_during_ack_is_not_dropped(self):
+        self.run_js("""
+let snapshots=0,rearmed=0;
+b.armWatch=async()=>{rearmed++;};
+b.client.request=async()=>{starts++;b.onTurnStarted({threadId:'thread',turn:{id:'delivery'}});};
+const helper=b.runInboxHelper.bind(b);
+b.runInboxHelper=async args=>{
+  if(args.includes('--snapshot') && ++snapshots>1)return '';
+  if(args.includes('--ack')){
+    b.pendingWake=true;
+    await b.onTurnCompleted({threadId:'thread',turn:{id:'delivery'}});
+  }
+  return helper(args);
+};
+await b.tryStartTurn();
+assert.equal(starts,1);assert.equal(snapshots,2);assert.equal(rearmed,1);assert(!b.pendingWake);
+""")
+
+    def test_shutdown_cancellation_cannot_interrupt_stop_response(self):
+        self.run_js("""
+let rejectPending,handled=0;
+b.shutdown=()=>{throw new Error('shutdown was re-entered by cancellation');};
+const handler=b.clientHandler('fixture',()=>new Promise((resolve,reject)=>{rejectPending=reject;}));
+handler({});b.stopping=true;
+rejectPending(new Error('intentional helper cancellation'));
+await new Promise(setImmediate);
+b.failClientHandler('fixture',new Error('late error'));
+b.clientHandler('turn/started',()=>{handled++;})({});
+assert.equal(handled,0);
+""")
+
     def test_inbox_helper_does_not_block_event_loop(self):
         self.run_js("""
 b.runInboxHelper=CodexBridge.prototype.runInboxHelper;
@@ -119,7 +199,6 @@ await b.shutdown(); await failed;
 """)
 
 
-@unittest.skipUnless(os.name == "nt", "Windows named pipe recovery")
 class ControlRecoveryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="agmsg-recovery-")
@@ -149,7 +228,7 @@ class ControlRecoveryTests(unittest.TestCase):
     def test_recovery_requires_exact_thread(self):
         result = self.call("delivery-retry", "other")
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(json.loads(self.file.read_text()), self.receipt)
+        self.assertEqual(json.loads(self.file.read_text(encoding="utf-8")), self.receipt)
 
     def test_unknown_can_be_explicitly_retried(self):
         result = self.call("delivery-retry")
@@ -161,7 +240,134 @@ class ControlRecoveryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         result = self.call("delivery-retry")
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(json.loads(self.file.read_text())["phase"], "accepted")
+        self.assertEqual(json.loads(self.file.read_text(encoding="utf-8"))["phase"], "accepted")
+
+    def test_live_monitor_excludes_recovery(self):
+        code = r'''
+const {spawn}=require('child_process'),assert=require('assert/strict');
+const control=require(process.argv[1]);
+(async()=>{
+ const server=await control.listen(control.address(process.argv[2],process.argv[3],[{team:'team',name:'alice'}]),
+   ()=>({ready:true}),async()=>{});
+ try {
+  const result=await new Promise((resolve,reject)=>{
+   const p=spawn(process.execPath,[process.argv[1],'delivery-retry',process.argv[3],'team','alice','thread']);
+   p.on('error',reject);p.on('close',resolve);
+  });
+  assert.notEqual(result,0);
+ } finally {await new Promise(resolve=>server.close(resolve));}
+})().catch(e=>{console.error(e);process.exitCode=1});
+'''
+        result = subprocess.run(["node", "-e", code, str(self.control), str(self.root), str(self.project)],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(self.file.read_text(encoding="utf-8")), self.receipt)
+
+    def test_posix_cli_recovery_uses_unix_endpoint(self):
+        # Exercise POSIX branching on Windows too; actual Unix socket lifecycle
+        # is covered separately on POSIX hosts.
+        code = r'''
+const assert=require('assert/strict'),fs=require('fs'),vm=require('vm'),path=require('path');
+const EventEmitter=require('events');
+const [file,project,platform,action]=process.argv.slice(1);
+let listened=false;
+const fakeProcess={platform,getuid:()=>12345,argv:['node',file,action,project,'team','alice','thread']};
+const fakeFs={...fs,
+ mkdirSync(dir,opts){assert.equal(dir,'/tmp/agmsg-codex-12345');assert.equal(opts.mode,0o700);},
+ lstatSync(){return {isDirectory:()=>true,uid:12345,mode:0o700};}};
+const fakeNet={createServer(){const server=new EventEmitter();
+ server.listen=(socket,ready)=>{assert.match(socket,/^\/tmp\/agmsg-codex-12345\/[a-f0-9]{64}\.sock$/);listened=true;ready();};
+ server.close=done=>done();return server;}};
+const mod={exports:{}};
+function req(name){return name==='fs'?fakeFs:name==='net'?fakeNet:require(name);}
+req.main=mod;
+vm.runInNewContext(fs.readFileSync(file,'utf8'),{
+ require:req,module:mod,process:fakeProcess,__dirname:path.dirname(file),console,
+});
+setImmediate(()=>{
+ assert(listened);assert(!fakeProcess.exitCode);
+ const receipt=path.resolve(path.dirname(file),'../../../../run/codex-bridge.team.alice.delivery.json');
+ if(action==='delivery-retry')assert(!fs.existsSync(receipt));
+ else assert.equal(JSON.parse(fs.readFileSync(receipt,'utf8')).phase,'accepted');
+});
+'''
+        for platform in ("linux", "darwin"):
+            for action in ("delivery-retry", "delivery-accept"):
+                with self.subTest(platform=platform, action=action):
+                    self.write()
+                    result = subprocess.run(["node", "-e", code, str(self.control), str(self.project), platform, action],
+                                            capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipIf(os.name == "nt", "Unix socket lifecycle")
+    def test_unix_control_socket_is_removed_on_clean_shutdown(self):
+        code = r'''
+const assert=require('assert/strict'),fs=require('fs'),control=require(process.argv[1]);
+(async()=>{
+ const socket=control.address(process.argv[2],process.argv[3],[{team:'team',name:'alice'}]);
+ const server=await control.listen(socket,()=>({ready:true}),async()=>{});
+ assert(fs.existsSync(socket));
+ assert((await control.query(socket)).ready);
+ await new Promise(resolve=>server.close(resolve));
+ assert(!fs.existsSync(socket));
+})().catch(e=>{console.error(e);process.exitCode=1});
+'''
+        result = subprocess.run(["node", "-e", code, str(self.control), str(self.root), str(self.project)],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_posix_address_preserves_case_and_rejects_unsafe_directory(self):
+        code = r'''
+const assert=require('assert/strict'),fs=require('fs'),vm=require('vm');
+const file=process.argv[1],mod={exports:{}};
+let stat={isDirectory:()=>true,uid:12345,mode:0o700};
+function req(name){return name==='fs'?{
+ realpathSync:value=>value,mkdirSync(){},lstatSync:()=>stat,
+}:require(name);}
+vm.runInNewContext(fs.readFileSync(file,'utf8'),{
+ require:req,module:mod,process:{platform:'linux',getuid:()=>12345},
+});
+const {address}=mod.exports,pair=[{team:'team',name:'alice'}];
+assert.notEqual(address('/Root','/Project',pair),address('/root','/project',pair));
+for(const unsafe of [{...stat,mode:0o755},{...stat,uid:67890},{...stat,isDirectory:()=>false}]){
+ stat=unsafe;assert.throws(()=>address('/root','/project',pair),/unsafe monitor control directory/);
+}
+'''
+        result = subprocess.run(["node", "-e", code, str(self.control)],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_control_stop_waits_for_response_flush(self):
+        code = r'''
+const assert=require('assert/strict'),fs=require('fs'),vm=require('vm'),EventEmitter=require('events');
+const mod={exports:{}};
+let connection,flushed,stopped=false,request;
+const net={createServer(opts,handler){connection=handler;
+ const server=new EventEmitter();server.listen=(pipe,ready)=>ready();return server;},
+ connect(){const socket=new EventEmitter();socket.setTimeout=()=>{};
+  socket.end=()=>{throw new Error('request side closed before reply');};
+  socket.write=line=>{request=line;setImmediate(()=>{
+   socket.emit('data','{"ready":true}');socket.emit('end');
+  });};
+  setImmediate(()=>socket.emit('connect'));return socket;}};
+function req(name){return name==='net'?net:require(name);}
+vm.runInNewContext(fs.readFileSync(process.argv[1],'utf8'),{
+ require:req,module:mod,process,console,
+});
+(async()=>{
+ const control=mod.exports;
+ await control.listen('fixture',()=>({ready:true}),async()=>{},()=>{stopped=true;});
+ const socket=new EventEmitter();socket.setTimeout=()=>{};
+ socket.end=(response,done)=>{assert.equal(JSON.parse(response).ready,true);flushed=done;};
+ connection(socket);socket.emit('data','stop\n');
+ await new Promise(setImmediate);
+ assert(flushed);assert(!stopped);flushed();assert(stopped);
+ assert((await control.query('fixture','stop')).ready);assert.equal(request,'stop\n');
+})().catch(e=>{console.error(e);process.exitCode=1});
+'''
+        result = subprocess.run(["node", "-e", code, str(self.control)],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

@@ -1,16 +1,30 @@
 "use strict";
 
-// Windows named pipes provide an atomic, process-lifetime lock. No PID selected
-// from a writable file is used to stop a process.
+// Native pipes/sockets serialize monitor startup and receipt recovery. No PID
+// selected from a writable file is used to stop a process.
 const net = require("net");
 const crypto = require("crypto");
 const fs = require("fs");
+const path = require("path");
 const { spawn } = require("child_process");
+
+function canonicalPath(value) {
+  const real = fs.realpathSync(value);
+  return process.platform === "win32" ? real.toLowerCase() : real;
+}
 
 function address(root, project, pair) {
   const key = crypto.createHash("sha256")
-    .update(JSON.stringify([fs.realpathSync(root).toLowerCase(), fs.realpathSync(project).toLowerCase(), pair])).digest("hex");
-  return `\\\\.\\pipe\\agmsg-codex-${key}`;
+    .update(JSON.stringify([canonicalPath(root), canonicalPath(project), pair])).digest("hex");
+  if (process.platform === "win32") return `\\\\.\\pipe\\agmsg-codex-${key}`;
+  // Keep below sockaddr_un's path limit even when the installation path is long.
+  const dir = `/tmp/agmsg-codex-${process.getuid()}`;
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const stat = fs.lstatSync(dir);
+  if (!stat.isDirectory() || stat.uid !== process.getuid() || (stat.mode & 0o077)) {
+    throw new Error(`unsafe monitor control directory: ${dir}`);
+  }
+  return `${dir}/${key}.sock`;
 }
 
 function query(pipe, action = "status", timeoutMs = action === "stop" ? 45000 : 1500) {
@@ -18,7 +32,8 @@ function query(pipe, action = "status", timeoutMs = action === "stop" ? 45000 : 
     const socket = net.connect(pipe);
     let data = "";
     socket.setTimeout(timeoutMs, () => socket.destroy(new Error("monitor control timeout")));
-    socket.on("connect", () => socket.end(`${action}\n`));
+    // The server ends the exchange after its response has been flushed.
+    socket.on("connect", () => socket.write(`${action}\n`));
     socket.on("data", (chunk) => {
       data += chunk;
       if (data.length > 8192) socket.destroy(new Error("invalid monitor control response"));
@@ -30,7 +45,7 @@ function query(pipe, action = "status", timeoutMs = action === "stop" ? 45000 : 
   });
 }
 
-async function listen(pipe, status, stop) {
+async function listen(pipe, status, stop, stopped = () => {}) {
   const server = net.createServer({ allowHalfOpen: true }, (socket) => {
     socket.setTimeout(1500, () => socket.destroy());
     socket.on("error", () => {});
@@ -45,12 +60,17 @@ async function listen(pipe, status, stop) {
       const result = status();
       if (action === "stop") {
         socket.setTimeout(45000);
-        Promise.resolve(stop()).then(() => socket.end(JSON.stringify(result)), () => socket.destroy());
+        Promise.resolve(stop()).then(() => socket.end(JSON.stringify(result), stopped), () => socket.destroy());
       } else socket.end(JSON.stringify(result));
     });
   });
   await new Promise((resolve, reject) => {
-    server.once("error", reject);
+    server.once("error", (error) => {
+      if (process.platform !== "win32" && error.code === "EADDRINUSE") {
+        error.message += `; control socket: ${pipe}. Stop the subscription first; if the socket is stale after a crash, remove that exact socket and retry. Never remove a live monitor's socket.`;
+      }
+      reject(error);
+    });
     server.listen(pipe, resolve);
   });
   return server;
@@ -105,13 +125,12 @@ module.exports = { address, query, listen, activate };
 if (require.main === module) {
   (async () => {
     const [action, project, team, name, thread] = process.argv.slice(2);
-    if (process.platform !== "win32" || !["status", "repair", "stop", "delivery-accept", "delivery-retry"].includes(action) || !project || !team || !name || !thread) {
+    if (!["status", "repair", "stop", "delivery-accept", "delivery-retry"].includes(action) || !project || !team || !name || !thread) {
       throw new Error("Usage: monitor-control.js status|repair|stop|delivery-accept|delivery-retry <project> <team> <name> <thread>");
     }
     if ([team, name].some((value) => /[/\\\x00-\x1f]/.test(value) || value === "." || value === "..")) {
       throw new Error("invalid team or agent name");
     }
-    const path = require("path");
     const root = path.resolve(__dirname, "../../../..");
     const pipe = address(root, project, [{ team, name }]);
     if (action.startsWith("delivery-")) {
@@ -121,7 +140,7 @@ if (require.main === module) {
         const receipt = JSON.parse(fs.readFileSync(file, "utf8"));
         if (receipt.version !== 1 || receipt.thread !== thread ||
             JSON.stringify(receipt.identities) !== JSON.stringify([{team, name}]) ||
-            fs.realpathSync(receipt.project).toLowerCase() !== fs.realpathSync(project).toLowerCase()) {
+            canonicalPath(receipt.project) !== canonicalPath(project)) {
           throw new Error("delivery receipt does not match the requested session");
         }
         if (action === "delivery-retry") {
@@ -158,7 +177,7 @@ if (require.main === module) {
       const meta = Object.fromEntries(fs.readFileSync(`${base}.meta`, "utf8").trim().split(/\r?\n/)
         .map((line) => { const i = line.indexOf("="); return [line.slice(0, i), line.slice(i + 1)]; }));
       if (meta.pid !== String(status.pid) || meta.type !== "codex" || meta.identities !== `${team}/${name}` ||
-          fs.realpathSync(meta.project).toLowerCase() !== fs.realpathSync(project).toLowerCase()) {
+          canonicalPath(meta.project) !== canonicalPath(project)) {
         throw new Error("bridge metadata does not match the live monitor; leaving its PID unchanged");
       }
       const temp = `${base}.pid.${process.pid}.tmp`;

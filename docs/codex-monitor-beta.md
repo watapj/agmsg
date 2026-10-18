@@ -89,10 +89,28 @@ node $control delivery-retry 'C:\path\to\project' team name thread-id
 ```
 
 Both commands require the receipt's exact project, role and thread and refuse
-to run while a monitor owns the control pipe. `delivery-accept` schedules only
+to run while a monitor owns the control endpoint. `delivery-accept` schedules only
 read acknowledgement; `delivery-retry` permits an unread message to be delivered
 on the next activation. Then run `$agmsg mode monitor` in the owning session.
 An already accepted receipt cannot be selected for retry.
+
+The same recovery actions work with the Linux/macOS launch wrapper. Use Bash:
+
+```bash
+control="$HOME/.agents/skills/agmsg/scripts/drivers/types/codex/monitor-control.js"
+node "$control" delivery-accept '/path/to/project' team name thread-id
+# OR, only after confirming the turn was never accepted:
+node "$control" delivery-retry '/path/to/project' team name thread-id
+```
+
+Stop the wrapper/subscription before recovery, then restart it using the launch
+wrapper below. Unix monitors use a socket in the private, owner-only directory
+`/tmp/agmsg-codex-<uid>/`. Clean shutdown removes the socket. A forced termination
+can leave it behind: if startup/recovery reports `EADDRINUSE`, first stop the
+subscription and confirm no monitor for that role remains, then remove only the
+exact `.sock` path printed in the error and retry. Do not remove a live monitor's
+socket; doing so would bypass its exclusion lock. Stale sockets are never
+automatically removed.
 
 For an update, stop and re-enable an existing bridge to load the new code.
 Before rolling back, resolve pending receipts and stop the monitor; older
