@@ -204,9 +204,10 @@ agmsg_project_path_variants() {
 }
 
 agmsg_project_sql_in_list() {
-  local path="$1" candidate escaped out=""
+  local path="$1" candidate escaped out="" quote="'"
   while IFS= read -r candidate; do
-    escaped=$(printf '%s' "$candidate" | sed "s/'/''/g")
+    # MSYS process startup is expensive; escaping each variant needs no child.
+    escaped=${candidate//"$quote"/"$quote$quote"}
     out="${out:+$out,}'$escaped'"
   done < <(agmsg_project_path_variants "$path")
   printf '%s' "$out"

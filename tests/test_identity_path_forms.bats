@@ -78,6 +78,15 @@ assert_identity_for() {
   assert_identity_for "/c/x's"
 }
 
+@test "project SQL variants escape every quote without spawning sed" {
+  sed() { return 99; }
+  local project="C:/space 日本語/o'brien/''; SELECT 'injected' --"
+  local sql
+  sql="$(agmsg_project_sql_in_list "$project")"
+  [ -n "$sql" ]
+  [ "$(sqlite_mem "SELECT $sql;")" = "$(agmsg_project_path_variants "$project" | paste -sd '|')" ]
+}
+
 @test "identities: non-Windows path strips trailing slash and still matches" {
   write_team_config '/tmp/agmsg-proj'
 
