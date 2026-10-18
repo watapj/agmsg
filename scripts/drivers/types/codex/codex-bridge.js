@@ -20,6 +20,7 @@ const RUN_DIR = path.join(SKILL_DIR, "run");
 // bash is always present in agmsg's runtime (the bridge is launched from a bash
 // context); honour the same overrides delivery.sh's windows_wrap uses.
 const BASH_BIN = process.env.GIT_BASH || process.env.AGMSG_BASH || "bash";
+const HELPER_TIMEOUT_MS = process.platform === "win32" ? 60000 : 30000;
 
 // A ceiling on how often watch-once may be re-armed, across every re-arm path
 // (a clean deadline, a wake and its turn, an idle transition). watch-once's own
@@ -1150,7 +1151,7 @@ class CodexBridge {
     const roleStartedAt = Date.now();
     const role = await new Promise((resolve, reject) => {
       const child = spawn(BASH_BIN, [path.join(SCRIPT_DIR, "codex-monitor-activate.sh"), "--check", this.opts.scriptProject, this.threadId], {
-        cwd: SKILL_DIR, windowsHide: true, timeout: 30000, stdio: ["ignore", "pipe", "pipe"],
+        cwd: SKILL_DIR, windowsHide: true, timeout: HELPER_TIMEOUT_MS, stdio: ["ignore", "pipe", "pipe"],
       });
       this.attachCheckChild = child;
       let stdout = "", stderr = "";
@@ -1171,7 +1172,7 @@ class CodexBridge {
     if (role.status !== 0 || role.stdout.trim() !== `${this.identity.team}\t${this.identity.name}`) {
       const lost = role.status === 3 || role.status === 0;
       const error = new Error(lost ? "current thread no longer owns this role; run agmsg actas first" :
-        `role helper failed (codex-monitor-activate.sh --check; elapsed=${Date.now() - roleStartedAt}ms; budget=30000ms; exit=${role.status}): ${role.stderr.trim()}`);
+        `role helper failed (codex-monitor-activate.sh --check; elapsed=${Date.now() - roleStartedAt}ms; budget=${HELPER_TIMEOUT_MS}ms; exit=${role.status}): ${role.stderr.trim()}`);
       error.roleCheckUnavailable = !lost;
       throw error;
     }
@@ -1927,7 +1928,7 @@ class CodexBridge {
     ].join("\n");
   }
 
-  async runInboxHelper(args, timeoutMs = process.platform === "win32" ? 60000 : 30000) {
+  async runInboxHelper(args, timeoutMs = HELPER_TIMEOUT_MS) {
     return new Promise((resolve, reject) => {
       const startedAt = Date.now();
       const name = `${path.basename(args[0])}${args.includes("--snapshot") ? " --snapshot" : args.includes("--ack") ? " --ack" : ""}`;

@@ -76,9 +76,10 @@ because this feature creates none.
 Inline delivery takes an unread snapshot, submits it to `turn/start`, and
 acknowledges only those message IDs after runtime acceptance. Helpers run
 asynchronously with hidden child processes. Inbox/ownership helpers have a
-60-second budget on Windows and 30 seconds elsewhere; the current-session
-verification helper retains its 30-second budget. Requested role pairs are
-filtered before ownership probes, so one monitor does not probe unrelated roles.
+60-second budget on Windows and 30 seconds elsewhere; current-session
+verification uses the same budget to avoid discarding slow, valid role checks.
+Requested role pairs are filtered before ownership probes, so one monitor does
+not probe unrelated roles.
 
 Before any `turn/start` attempt, a failed helper leaves messages unread and
 automatically retries up to three times, after 5, 15 and 45 seconds. Periodic

@@ -41,6 +41,15 @@ class DeliveryReceiptTests(unittest.TestCase):
                 cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=20)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_role_helper_diagnostic_uses_the_platform_helper_budget(self):
+        self.run_js("""
+b.client.request=async method=>method==='thread/loaded/list'
+ ? {data:['thread']} : {thread:{cwd:dir}};
+await assert.rejects(b.verifyCurrentThread(),error=>
+ error.roleCheckUnavailable && error.message.includes(
+  `budget=${process.platform==='win32'?60000:30000}ms`));
+""")
+
     def test_ack_only_after_acceptance_and_only_snapshot_ids(self):
         self.run_js("""
 await b.tryStartTurn(); assert.equal(starts,1);
