@@ -103,7 +103,11 @@ async function activate(pipe, script, args, log, expected) {
       child.unref();
       if (error) { child.kill(); reject(error); } else resolve(status);
     };
-    const timer = setTimeout(() => finish(new Error(`monitor startup timed out; see ${log}`)), 45000);
+    // Windows startup may verify ownership, recover an accepted receipt
+    // (eligibility + acknowledgement), then arm the watch. Each helper can
+    // take 60 seconds; do not kill a valid recovery after only 45 seconds.
+    const startupTimeoutMs = process.platform === "win32" ? 240000 : 45000;
+    const timer = setTimeout(() => finish(new Error(`monitor startup timed out; see ${log}`)), startupTimeoutMs);
     child.on("error", (error) => finish(error));
     child.on("message", (status) => {
       if (matches(status)) finish(null, status);

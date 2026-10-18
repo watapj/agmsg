@@ -78,6 +78,8 @@ acknowledges only those message IDs after runtime acceptance. Helpers run
 asynchronously with hidden child processes. Inbox/ownership helpers have a
 60-second budget on Windows and 30 seconds elsewhere; current-session
 verification uses the same budget to avoid discarding slow, valid role checks.
+Windows startup allows up to 240 seconds for verification, accepted-receipt
+recovery and watch setup; readiness is reported as soon as setup completes.
 Requested role pairs are filtered before ownership probes, so one monitor does
 not probe unrelated roles.
 

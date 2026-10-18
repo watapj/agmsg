@@ -482,6 +482,35 @@ for(const unsafe of [{...stat,mode:0o755},{...stat,uid:67890},{...stat,isDirecto
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_startup_budget_allows_windows_receipt_recovery(self):
+        code = r'''
+const assert=require('assert/strict'),fs=require('fs'),vm=require('vm'),EventEmitter=require('events');
+(async()=>{
+ for(const platform of ['win32','linux']) {
+  const mod={exports:{}};let budget,killed=false;
+  const child=new EventEmitter();child.connected=true;
+  child.disconnect=()=>{};child.unref=()=>{};child.kill=()=>{killed=true;};
+  function req(name) {
+   if(name==='net')return {connect(){const s=new EventEmitter();s.setTimeout=()=>{};
+    queueMicrotask(()=>s.emit('error',Object.assign(new Error('absent'),{code:'ENOENT'})));return s;}};
+   if(name==='fs')return {openSync:()=>1,closeSync:()=>{}};
+   if(name==='child_process')return {spawn(){queueMicrotask(()=>child.emit('message',
+    {ready:true,thread:'thread',appServer:'endpoint'}));return child;}};
+   return require(name);
+  }
+  vm.runInNewContext(fs.readFileSync(process.argv[1],'utf8'),{
+   require:req,module:mod,process:{platform,execPath:process.execPath},console,
+   setTimeout(fn,ms){budget=ms;return 1;},clearTimeout(){},
+  });
+  const result=await mod.exports.activate('pipe','script',[],'log',{thread:'thread',appServer:'endpoint'});
+  assert(result.ready);assert(!killed);assert.equal(budget,platform==='win32'?240000:45000);
+ }
+})().catch(e=>{console.error(e);process.exitCode=1});
+'''
+        result = subprocess.run(["node", "-e", code, str(self.control)],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_control_stop_waits_for_response_flush(self):
         code = r'''
 const assert=require('assert/strict'),fs=require('fs'),vm=require('vm'),EventEmitter=require('events');
