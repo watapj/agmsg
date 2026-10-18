@@ -51,6 +51,49 @@ teardown() { teardown_test_env; }
   [ ! -s "$POKE_LOG" ]
 }
 
+@test "safe-poke: Orca bare and instance-qualified IDs share a composer lock" {
+  source "$SKILL_DIR/scripts/drivers/terminals/orca/ops.sh"
+  _AGMSG_TERMINAL_LOADED=orca
+  terminal_input_draft() { printf '\n'; }
+  terminal_poke() {
+    mkdir "$POKE_LOG.active" || return 99
+    sleep 1
+    printf '%s\n' "$2" >> "$POKE_LOG"
+    rmdir "$POKE_LOG.active"
+  }
+  local pane=term_11111111-1111-4111-8111-111111111111
+  agmsg_safe_poke "$pane" first '' no team alice &
+  local first=$!
+  agmsg_safe_poke "local:$pane" second '' no other alias &
+  local second=$!
+  wait "$first"
+  wait "$second"
+  [ "$(wc -l < "$POKE_LOG" | tr -d '[:space:]')" -eq 2 ]
+}
+
+@test "safe-poke: invalid canonical identity refuses before terminal access" {
+  terminal_id_split() { return 1; }
+  run agmsg_safe_poke broken text '' no team alice
+  [ "$status" -eq 10 ]
+  [ ! -s "$POKE_LOG" ]
+}
+
+@test "safe-poke: qualified Orca ID respects an interrupted canonical lock" {
+  source "$SKILL_DIR/scripts/drivers/terminals/orca/ops.sh"
+  source "$SKILL_DIR/scripts/lib/hash.sh"
+  _AGMSG_TERMINAL_LOADED=orca
+  local pane=term_11111111-1111-4111-8111-111111111111 key lock
+  key="$(printf '%s\n%s' orca "$(terminal_id_split "$pane")" | agmsg_sha1)"
+  lock="$SKILL_DIR/run/poke-pane.$key.lock"
+  mkdir -p "$lock"
+  printf 'pid=123\nphase=submitting\n' > "$lock/owner"
+  sleep() { SECONDS=$((SECONDS + 15)); }
+  run agmsg_safe_poke "local:$pane" text '' no team alice
+  [ "$status" -eq 75 ]
+  [ -f "$lock/owner" ]
+  [ ! -s "$POKE_LOG" ]
+}
+
 @test "safe-poke: a driver-capable draft hook is checked first -- content refuses without polling the screen, empty-twice pokes, unknown (rc 10) stops without writing (#1443 continuation)" {
   # (a) A real draft on the FIRST read refuses immediately (rc 14) and never
   # calls terminal_poke or any screen-reading function -- the whole point of

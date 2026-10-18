@@ -390,8 +390,11 @@ agmsg_safe_poke() (
   # explicit poke and self-poke callers, not only send's automatic delivery.
   umask 077
   . "$_AGMSG_SAFE_POKE_LIB_DIR/hash.sh"
-  local key lock deadline=$((SECONDS + 15))
-  key="$(printf '%s\n%s' "${_AGMSG_TERMINAL_LOADED:-unknown}" "$1" | agmsg_sha1)" || return 1
+  local key lock pane="$1" deadline=$((SECONDS + 15))
+  if declare -F terminal_id_split >/dev/null 2>&1; then
+    pane="$(terminal_id_split "$1")" || { echo 'poke: cannot normalize composer identity' >&2; return 10; }
+  fi
+  key="$(printf '%s\n%s' "${_AGMSG_TERMINAL_LOADED:-unknown}" "$pane" | agmsg_sha1)" || return 1
   lock="$SKILL_DIR/run/poke-pane.$key.lock"
   mkdir -p "$SKILL_DIR/run" || return 1
   while ! mkdir "$lock" 2>/dev/null; do
